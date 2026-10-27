@@ -2125,7 +2125,9 @@ async function loadEarlier(s, opts) {
 
 /* ================= 实时流（WebSocket 下行） ================= */
 /* 登录过期（401）：独立 PWA 的 cookie 与 Safari 可能不共享/已过期，
-   表现成"界面看着活着（WS 是旧连接）但发消息永远发不出去"。给出明确出路而不是让它看起来像网络问题。 */
+   表现成"界面看着活着（WS 是旧连接）但发消息永远发不出去"。给出明确出路而不是让它看起来像网络问题。
+   iOS 主屏 App 与 Safari 的 cookie 罐相互隔离（加图标时复制一次，之后互不相通），
+   「去 Safari 打开链接再回来刷新」走不通；出路是在本应用内用启动 token 换一枚新 cookie。 */
 function markAuthExpired() {
   if (S.authExpired) return
   S.authExpired = true
@@ -2141,12 +2143,74 @@ function renderAuthBanner() {
     document.body.appendChild(el2)
   }
   el2.textContent = ''
-  el2.appendChild(document.createTextNode('登录已过期：请在 Safari 重新打开带 token 的访问链接，然后回到本页刷新。'))
+  el2.appendChild(document.createTextNode('登录已过期：点「重新登录」，粘贴 Mac 上 dsh web 启动打印的访问链接即可在本机恢复，无需重装本应用。'))
   const btn = document.createElement('button')
   btn.type = 'button'
-  btn.textContent = '刷新'
-  btn.onclick = () => location.reload()
+  btn.textContent = '重新登录'
+  btn.onclick = openReloginDialog
   el2.appendChild(btn)
+}
+/* 应用内续登：粘贴带 ?token= 的启动链接（或裸 token），fetch 本 origin 的 /?token=…
+   换取新 Set-Cookie（同源请求浏览器照常收下，绕开 iOS 主屏 App 与 Safari 的 cookie 罐隔离），
+   成功后整页刷新回到登录态。对话框放屏幕上部：iOS 键盘从底部弹出也不遮挡。 */
+function openReloginDialog() {
+  const stale = document.getElementById('relogin-overlay')
+  if (stale) stale.remove()
+  const ov = el('div', 'relogin-overlay')
+  ov.id = 'relogin-overlay'
+  const card = el('div', 'relogin-card')
+  card.setAttribute('role', 'dialog')
+  card.setAttribute('aria-label', '重新登录')
+  card.appendChild(el('div', 'rl-title', '重新登录'))
+  card.appendChild(el('div', 'rl-note', '在 Mac 上复制 dsh web 启动时打印的访问链接（形如 http://127.0.0.1:3080/?token=…），粘贴到下面。链接只用于在本设备换取登录，不会发往别处。'))
+  const input = el('input', 'rl-input')
+  input.type = 'text'
+  input.placeholder = '粘贴访问链接或 token'
+  input.setAttribute('autocapitalize', 'off')
+  input.setAttribute('autocomplete', 'off')
+  input.setAttribute('autocorrect', 'off')
+  input.spellcheck = false
+  card.appendChild(input)
+  const status = el('div', 'rl-status')
+  status.setAttribute('role', 'status')
+  card.appendChild(status)
+  const row = el('div', 'rl-row')
+  const cancel = el('button', 'rl-cancel', '取消')
+  cancel.type = 'button'
+  cancel.onclick = () => ov.remove()
+  const ok = el('button', 'rl-ok', '登录')
+  ok.type = 'button'
+  const submit = async () => {
+    const raw = (input.value || '').trim()
+    const m = raw.match(/token=([A-Za-z0-9_-]{16,})/)
+    const tok = m ? m[1] : (/^[A-Za-z0-9_-]{24,}$/.test(raw) ? raw : null)
+    if (!tok) {
+      status.textContent = '没认出 token：请粘贴完整链接（含 ?token=… 部分），或只粘贴 token 本身。'
+      input.focus()
+      return
+    }
+    ok.disabled = true
+    cancel.disabled = true
+    status.textContent = '正在登录…'
+    try {
+      const r = await fetch('/?token=' + encodeURIComponent(tok), { credentials: 'same-origin', redirect: 'follow', cache: 'no-store' })
+      if (r.ok) { status.textContent = '登录成功，正在刷新…'; location.reload(); return }
+      status.textContent = '登录失败（HTTP ' + r.status + '）：token 不对或已过期。Mac 上重启过 dsh web 会更换 token，请复制最新一条 dsh web: 链接重试。'
+    } catch (e2) {
+      status.textContent = '网络错误：' + ((e2 && e2.message) || e2)
+    }
+    ok.disabled = false
+    cancel.disabled = false
+  }
+  ok.onclick = submit
+  input.addEventListener('keydown', (e2) => { if (e2.key === 'Enter') submit() })
+  row.appendChild(cancel)
+  row.appendChild(ok)
+  card.appendChild(row)
+  ov.appendChild(card)
+  ov.addEventListener('click', (e2) => { if (e2.target === ov) ov.remove() })
+  document.body.appendChild(ov)
+  input.focus()
 }
 /* 手动重连：列表页连接胶囊与会话页断线条共用；后台另有 15s 轮询兜底 */
 function manualReconnect() {
