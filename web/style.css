@@ -990,6 +990,7 @@ html.light .tk-row.now { background:rgba(59,130,246,.09); }
 .msg.user .meta-time { margin-right:0; margin-left:6px; }
 .meta-pending { font-size:11px; color:var(--text-3); }
 .meta-ico { width:30px; height:30px; border-radius:9px; border:none; background:none; color:var(--text-3); display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.meta-ico.on { color: var(--accent); }   /* 消息评价已选中态（👍/👎） */
 .meta-ico:active { background:var(--bg-card-2); transform:scale(.85); }
 .meta-ico svg { width:14px; height:14px; }
 .meta-ico.think.live { color:var(--purple); }

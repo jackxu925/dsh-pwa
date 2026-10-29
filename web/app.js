@@ -91,6 +91,8 @@ const ICONS = {
   file: SVG_OPEN + '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6z"/><path d="M14 3v6h6"/></svg>',
   pencil: SVG_OPEN + '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>',
   search: SVG_OPEN + '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
+  thumb: SVG_OPEN + '<path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.3a2 2 0 0 0 2-1.7l1.4-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>',
+  thumbDown: SVG_OPEN + '<path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.7a2 2 0 0 0-2 1.7l-1.4 9a2 2 0 0 0 2 2.3zM17 2h2.7A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.3 2H17"/>',
   todo: SVG_OPEN + '<path d="m3 6 2 2 4-4M3 16l2 2 4-4M13 6h8M13 16h8"/></svg>',
   robot: SVG_OPEN + '<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>',
   globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
@@ -550,7 +552,7 @@ function foldEvent(s, event, view) {
       // 「只有思考、没有正文」是每个工具步骤前的常态（一轮里能有上百条）：
       // 单独成条会渲染成一排空泡泡，所以先攒着，挂到下一条真正的内容上
       if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
-      s.items.push({ kind: 'assistant', text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn, usage: d.usage || null })
+      s.items.push({ kind: 'assistant', mid: m.id || null, text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn, usage: d.usage || null })
       s.lastPreview = text
       prevDirtyClear(s.id)
       break
@@ -666,6 +668,21 @@ function foldEvent(s, event, view) {
       break
     }
     case 'session/title': if (d.title) s.title = d.title; break
+    case 'feedback/message-put': {
+      // 评价多端同步：桌面/别处刚评过 → 更新本会话评价表（表未加载则跳过，打开时的 list 会拿到最新）
+      if (d && d.sessionId === s.id && d.item && s._fbLoaded && s._fb) {
+        s._fb.set(d.item.messageId, d.item)
+        if (S.current === s.id) scheduleRender(s)
+      }
+      break
+    }
+    case 'feedback/message-delete': {
+      if (d && d.sessionId === s.id && d.messageId && s._fbLoaded && s._fb) {
+        s._fb.delete(d.messageId)
+        if (S.current === s.id) scheduleRender(s)
+      }
+      break
+    }
     case 'goal/change': {
       // 目标变更标记：create/edit/pause/resume/complete/clear → 极简系统行
       const opMap = { create: '已创建', edit: '已修改', pause: '已暂停', resume: '已恢复', complete: '已完成', clear: '已删除', blocked: '被卡住' }
@@ -1225,6 +1242,18 @@ function itemNodeInner(s, item) {
       const aq = metaIcon('quote', '引用这条回答')
       aq.onclick = () => quoteNow(s.id, '助手', item.text)
       meta.appendChild(aq)
+      // 消息评价（👍/👎）：常驻小图标，再点同向 = 撤销；状态来自 messageFeedback/list（打开会话时拉取）
+      if (item.mid) {
+        const cur = (s._fb && s._fb.get(item.mid)) || null
+        const up = metaIcon('thumb', cur && cur.rating === 'positive' ? '撤销好评' : '这条有帮助')
+        if (cur && cur.rating === 'positive') up.classList.add('on')
+        up.onclick = () => rateMsg(s, item, 'positive')
+        meta.appendChild(up)
+        const dn = metaIcon('thumbDown', cur && cur.rating === 'negative' ? '撤销差评' : '这条没帮助')
+        if (cur && cur.rating === 'negative') dn.classList.add('on')
+        dn.onclick = () => rateMsg(s, item, 'negative')
+        meta.appendChild(dn)
+      }
       if (item.reasoning && item.reasoning.trim()) meta.appendChild(thinkDot(() => openThink({ text: item.reasoning, live: false })))
       // 轮级统计 pill（P1 方案）：只挂在轮的最后一条助手消息上（turnStats 由 turn/end 计算）；
       // 运行中的轮由 syncLivePill 往同一位置挂实时 pill，轮结束就地换成正式 pill（不跳位）
@@ -1325,6 +1354,39 @@ function metaIcon(name, label) {
   d.setAttribute('aria-label', label || name)
   d.innerHTML = ICONS[name] || ''
   return d
+}
+/* ---- 消息评价（👍/👎）：messageFeedback/{list,put,delete}，CAS 版本号（ifVersion）；再点同向 = 撤销 ----
+   打开会话时拉一次全量列表（轻），桌面/多端的变更经 feedback/message-put|delete 事件同步进同一张表 */
+function loadFb(s, force) {
+  if (!force && (s._fbLoading || s._fbLoaded)) return
+  s._fbLoading = true
+  rpc('messageFeedback/list', { request: { sessionId: s.id } }).then((v) => {
+    s._fb = new Map(v && v.ok && v.value && Array.isArray(v.value.items) ? v.value.items.map((it) => [it.messageId, it]) : [])
+  }).catch(() => {
+    /* 静默：评价拉不到不阻聊天，图标显示为未评价态；下次打开会话再试 */
+  }).finally(() => {
+    s._fbLoading = false
+    s._fbLoaded = true
+    if (S.current === s.id) scheduleRender(s)
+  })
+}
+async function rateMsg(s, item, rating) {
+  vibrate(8)
+  if (!item.mid) return
+  if (!s._fbLoaded) { toast('评价还没就绪，稍后再试', true); return }
+  const cur = (s._fb && s._fb.get(item.mid)) || null
+  try {
+    if (cur && cur.rating === rating) {
+      const v = await rpc('messageFeedback/delete', { request: { sessionId: s.id, messageId: item.mid, ifVersion: cur.version } })
+      if (v && v.ok) { s._fb.delete(item.mid); toast(rating === 'positive' ? '已撤销好评' : '已撤销差评') }
+      else { toast('别处刚改过这条评价，已刷新', true); loadFb(s, true); return }
+    } else {
+      const v = await rpc('messageFeedback/put', { request: { sessionId: s.id, messageId: item.mid, rating, ifVersion: cur ? cur.version : null } })
+      if (v && v.ok) { s._fb.set(item.mid, v.value); toast('谢谢反馈 ✓') }
+      else { toast('别处刚改过这条评价，已刷新', true); loadFb(s, true); return }
+    }
+  } catch (e) { toast('评价失败：' + e.message, true); return }
+  if (S.current === s.id) scheduleRender(s)
 }
 /* 「只有思考没有正文」的 assistant 消息先攒在会话上，交给下一条内容承载（避免空泡泡） */
 function takeThinkBuf(s) {
@@ -2764,6 +2826,7 @@ async function openSession(id, force) {
   renderChat(s, true)
   refreshChatChrome(s)
   restoreDraft(id)
+  loadFb(s)   // 消息评价表（👍/👎）：打开会话时拉一次，静默失败
 }
 function reloadCurrent() {
   // 重连后的强制刷新：保留在 chat 视图（不重复进入动画）
