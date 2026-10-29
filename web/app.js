@@ -278,6 +278,7 @@ const S = {
   listLoaded: false,        // 首次 session/list 是否已落地（空态分岔用）
   staleNotice: null,        // 断线期间失效的审批/提问计数（重连后挂条提示，可手动关掉）
   authExpired: false,       // rpc 401 → 顶部常驻横幅（PWA cookie 隔离时给出明确出路）
+  glob: { q: '', seq: 0, timer: 0, loading: false, error: false, results: [], hasMore: false },  // 全局搜索（session/search 搜消息内容）
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
 }
@@ -1429,12 +1430,13 @@ function renderList() {
     if (q) {
       const box = el('div', 'empty-state')
       box.appendChild(el('div', null, '没有标题或路径含「' + q + '」的会话'))
-      box.appendChild(el('div', 'empty-sub', '搜索范围：标题与工作区路径，暂不覆盖消息内容'))
+      box.appendChild(el('div', 'empty-sub', (S.glob.loading && S.glob.q === q) ? '正在搜索消息内容…' : '看看下面的消息内容结果'))
       const clear = el('button', 'empty-clear', '清除搜索')
       clear.type = 'button'
       clear.onclick = () => { const inp = $('#search'); if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })) } vibrate(8) }
       box.appendChild(clear)
       wrap.appendChild(box)
+      renderGlobSection(wrap, q, false)
       return
     }
     if (!S.listLoaded) {
@@ -1445,9 +1447,11 @@ function renderList() {
     return
   }
   // 「继续上次会话」置顶入口已移除：两级工作区视图 + 「最近活跃」时间视图都能一步直达最近对话
-  // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接
+  // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接；
+  // 本地命中（标题/路径）之下再拼一段「消息内容命中」（session/search 全局搜正文）
   if (q) {
     for (const s of visible) wrap.appendChild(sessionCard(s, true))
+    renderGlobSection(wrap, q, true)
     return
   }
   // 按时间视图：全部会话平铺、按最近活跃降序，卡片标注所属工作区
@@ -1489,6 +1493,87 @@ function renderList() {
   }
   setListTitle(null)
   for (const entry of wsSorted) wrap.appendChild(wsRow(entry))
+}
+/* ---- 全局搜索（消息内容）：session/search 只回 sessionId + snippet，本地拼一层轻 UI ----
+   本地过滤管标题/工作区路径；这里管正文。350ms 防抖 + seq 乱序守卫；失败静默降级（不打断本地结果）。 */
+function scheduleGlobSearch() {
+  const q = ($('#search').value || '').trim()
+  const g = S.glob
+  g.q = q
+  clearTimeout(g.timer)
+  if (q.length < 2) { g.seq++; g.loading = false; g.error = false; g.results = []; g.hasMore = false; return }
+  g.timer = setTimeout(runGlobSearch, 350)
+}
+async function runGlobSearch() {
+  const q = S.glob.q
+  if (!q || q.length < 2) return
+  const seq = ++S.glob.seq
+  S.glob.loading = true
+  try {
+    const v = await rpc('session/search', { request: { query: q } })
+    if (seq !== S.glob.seq) return   // 输入已前进：丢弃过期响应
+    S.glob.loading = false; S.glob.error = false
+    S.glob.results = (v && v.items) || []
+    S.glob.hasMore = !!(v && v.hasMore)
+  } catch (e) {
+    if (seq !== S.glob.seq) return
+    S.glob.loading = false; S.glob.error = true; S.glob.results = []; S.glob.hasMore = false
+  }
+  if (S.glob.q === q) renderListSoon()
+}
+/* 搜索视图里拼「消息内容命中」段；hasLocal=本地标题/路径已有命中（无命中时的提示才不重复） */
+function renderGlobSection(wrap, q, hasLocal) {
+  const g = S.glob
+  if (g.loading || g.q !== q) {   // 防抖窗内/请求在途：q 已变但旧结果还没作废，先标搜索中
+    const head = el('div', 'ws-group glob-head')
+    head.appendChild(icon('search', 14))
+    head.appendChild(el('span', null, '消息内容 · 搜索中…'))
+    wrap.appendChild(head)
+    return
+  }
+  if (g.error) {
+    if (!hasLocal) wrap.appendChild(el('div', 'empty-sub glob-none', '内容搜索暂不可用，稍后再试'))
+    return
+  }
+  const hits = (g.results || []).filter((h) => h && h.sessionId)
+  if (!hits.length) {
+    if (!hasLocal) wrap.appendChild(el('div', 'empty-sub glob-none', '消息内容里也没有命中'))
+    return
+  }
+  const head = el('div', 'ws-group glob-head')
+  head.appendChild(icon('search', 14))
+  head.appendChild(el('span', null, '消息内容命中（' + hits.length + (g.hasMore ? '+' : '') + '）'))
+  wrap.appendChild(head)
+  for (const h of hits.slice(0, 20)) wrap.appendChild(globHitNode(h, q))
+  if (g.hasMore) wrap.appendChild(el('div', 'empty-sub glob-none', '结果较多，试试更具体的关键词'))
+}
+/* 单条命中：会话标题 + 摘要（命中词高亮）+ 工作区提示；点按直达会话 */
+function globHitNode(hit, q) {
+  const s = S.sessions.get(hit.sessionId)
+  const row = el('div', 'glob-hit')
+  row.setAttribute('role', 'button')
+  row.setAttribute('tabindex', '0')
+  row.setAttribute('aria-label', '打开会话：' + (s ? sessTitle(s) : hit.sessionId))
+  row.appendChild(el('div', 'gh-title', s ? sessTitle(s) : '会话 ' + String(hit.sessionId).slice(0, 8)))
+  row.appendChild(snipNode(hit.snippet || '', q))
+  if (s && s.cwd) row.appendChild(el('div', 'gh-ws', s.cwd.split('/').filter(Boolean).pop() || s.cwd))
+  const open = () => { vibrate(8); location.hash = '#/s/' + hit.sessionId }
+  row.onclick = open
+  row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+  return row
+}
+/* 摘要节点：命中片段 <mark> 高亮（大小写不敏感），最多 6 段防碎片化 */
+function snipNode(snippet, q) {
+  const n = el('div', 'gh-snip')
+  const low = snippet.toLowerCase(), ql = q.toLowerCase()
+  let i = 0, at
+  while (ql && (at = low.indexOf(ql, i)) !== -1 && n.childNodes.length < 11) {
+    if (at > i) n.appendChild(document.createTextNode(snippet.slice(i, at)))
+    n.appendChild(el('mark', null, snippet.slice(at, at + q.length)))
+    i = at + q.length
+  }
+  if (i < snippet.length) n.appendChild(document.createTextNode(snippet.slice(i)))
+  return n
 }
 /* 工作区行：图标 + 名称 + 最新会话 · 右侧会话数/时间，点按下钻 */
 function wsRow(entry) {
@@ -5296,7 +5381,7 @@ function buildShell() {
   gh('#ws-group-h', 'folder', '选择工作区')
   gh('#preset-group-h', 'robot', 'Agent 预设')
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
-  $('#search').addEventListener('input', renderList)
+  $('#search').addEventListener('input', () => { renderList(); scheduleGlobSearch() })
   // 列表视图切换：最近活跃平铺 / 按工作区分组
   // 列表一滚就收起左滑操作（iOS Mail 同款）：滚动中不再有横在半路的卡片
   const listScroll = $('#list-scroll')
