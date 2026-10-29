@@ -683,6 +683,16 @@ function foldEvent(s, event, view) {
       }
       break
     }
+    case 'compaction/summary': {
+      // 压缩标记：案卷太厚时宿主把较早对话浓缩成摘要——时间线上一行可点开的交代
+      s.items.push({ kind: 'sys', compact: { count: (d.shadowedSeqs || []).length, tokens: d.shadowedTokenCount || 0, summary: textOf(d.summary || []), model: d.model || '' }, time: event.time, seq: event.seq })
+      if (S.current === s.id) scheduleRender(s)
+      break
+    }
+    case 'compaction/end': {
+      if (d && d.error) s.items.push({ kind: 'sys', text: '⚠ 自动压缩失败：' + d.error, time: event.time, seq: event.seq })
+      break
+    }
     case 'goal/change': {
       // 目标变更标记：create/edit/pause/resume/complete/clear → 极简系统行
       const opMap = { create: '已创建', edit: '已修改', pause: '已暂停', resume: '已恢复', complete: '已完成', clear: '已删除', blocked: '被卡住' }
@@ -1302,6 +1312,18 @@ function itemNodeInner(s, item) {
         d.appendChild(el('span', 'msw-tx', '→ ' + modelNameOf(s, item.modelSel)))
         return d
       }
+      if (item.compact) {
+        // 压缩标记行：点开看摘要全文（被压缩条数 / tokens / 摘要模型）
+        d.style.cursor = 'pointer'
+        d.setAttribute('role', 'button')
+        d.setAttribute('tabindex', '0')
+        d.appendChild(el('span', 'msw-dot'))
+        d.appendChild(el('span', 'msw-tx', '📦 已压缩 · 前 ' + (item.compact.count || '?') + ' 条 → 摘要'))
+        const openCp = () => { vibrate(8); openCompactSheet(item.compact) }
+        d.onclick = openCp
+        d.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCp() } }
+        return d
+      }
       d.appendChild(el('span', null, item.text))
       const sq = el('button', 'meta-ico sys-q')
       sq.type = 'button'
@@ -1387,6 +1409,24 @@ async function rateMsg(s, item, rating) {
     }
   } catch (e) { toast('评价失败：' + e.message, true); return }
   if (S.current === s.id) scheduleRender(s)
+}
+/* 压缩摘要单：被压缩条数 / tokens / 摘要全文；临时浮层与「模型选择」同构（nm-ov 模式） */
+function openCompactSheet(cp) {
+  let ov = $('#cp-ov')
+  if (!ov) {
+    ov = el('div', 'sheet-overlay')
+    ov.id = 'cp-ov'
+    ov.innerHTML = '<div class="sheet q-sheet"><div class="grabber"></div><div class="qd-head"><span class="qd-title">压缩摘要</span><span class="qd-cnt"></span><button class="think-close" id="cp-close" type="button" aria-label="关闭">✕</button></div><div class="qd-list" id="cp-list"></div></div>'
+    document.querySelector('#app').appendChild(ov)
+    ov.addEventListener('click', (e) => { if (e.target === ov) ovSet('cp-ov', false) })
+    $('#cp-close').onclick = () => ovSet('cp-ov', false)
+  }
+  const list = $('#cp-list')
+  list.textContent = ''
+  list.appendChild(el('div', 'cp-meta', '被压缩 ' + (cp.count || '?') + ' 条 · 约 ' + fmtTok(cp.tokens || 0) + ' tokens' + (cp.model ? ' · 摘要模型 ' + cp.model : '')))
+  list.appendChild(el('div', 'cp-body', cp.summary && cp.summary.trim() ? cp.summary : '（本次压缩没有生成摘要文本）'))
+  list.appendChild(el('div', 'sheet-note', '上下文太长时，宿主把较早的对话浓缩成这段摘要再继续——之后模型的「记忆」以它为准，更早的细节可能被略过。'))
+  ovSet('cp-ov', true)
 }
 /* 「只有思考没有正文」的 assistant 消息先攒在会话上，交给下一条内容承载（避免空泡泡） */
 function takeThinkBuf(s) {

@@ -993,6 +993,9 @@ html.light .tk-row.now { background:rgba(59,130,246,.09); }
 .meta-ico.on { color: var(--accent); }   /* 消息评价已选中态（👍/👎） */
 .meta-ico:active { background:var(--bg-card-2); transform:scale(.85); }
 .meta-ico svg { width:14px; height:14px; }
+/* 压缩摘要单（cp-ov 浮层内容） */
+.cp-meta { padding: 10px 16px 0; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cp-body { padding: 12px 16px 4px; font-size: 13.5px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
 .meta-ico.think.live { color:var(--purple); }
 .meta-ico.think.live svg { animation:think-pulse 1.2s ease-in-out infinite; }
 @keyframes think-pulse { 0%,100% { opacity:.35; transform:scale(.85); } 50% { opacity:1; transform:scale(1.12); } }
