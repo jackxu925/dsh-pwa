@@ -2049,7 +2049,7 @@ function openFilePreview(s, opts) {
         body.appendChild(el('div', 'fp-none', '预览加载失败（' + e.message + '）'))
       })
     } else if (EXT_TEXT.has(ext)) {
-      rpc('workspaceFiles/read', { workspaceFileScopeId: s.id, path: opts.wsPath || relPathOf(s, opts.absPath) }).then((v) => {
+      rpc('workspaceFiles/read', { workspaceFileScopeId: s.id, path: opts.wsPath || relPathOf(s, opts.absPath), range: { limit: 2000 } }).then((v) => {
         renderPreview('text', (v && v.text) || '')
       }).catch((e) => {
         body.textContent = ''
