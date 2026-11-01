@@ -275,7 +275,8 @@ const S = {
   connState: 'connecting',  // connecting | online | offline
   current: null,            // open session id
   todoMode: false,          // 待办过滤
-  listMode: (() => { try { return localStorage.getItem('dshm-list-mode') || 'time' } catch (e) { return 'time' } })(),  // 列表视图：time（按最近活跃平铺）| workspace（按工作区分组）
+  listMode: (() => { try { return localStorage.getItem('dshm-list-mode') || 'time' } catch (e) { return 'time' } })(),  // 列表视图：time（按最近活跃平铺）| workspace（按工作区分组）| rem（提醒中心）
+  rem: { loaded: false, at: 0, loading: false, items: [] },   // 提醒中心：schedule/catalog 的缓存（30s TTL，切 tab 即刷新）
   wsDrill: null,            // 「按工作区」视图下钻的工作区 id（null = 显示工作区列表）；'__other__' = 未分组
   listLoaded: false,        // 首次 session/list 是否已落地（空态分岔用）
   staleNotice: null,        // 断线期间失效的审批/提问计数（重连后挂条提示，可手动关掉）
@@ -687,6 +688,11 @@ function foldEvent(s, event, view) {
       // 压缩标记：案卷太厚时宿主把较早对话浓缩成摘要——时间线上一行可点开的交代
       s.items.push({ kind: 'sys', compact: { count: (d.shadowedSeqs || []).length, tokens: d.shadowedTokenCount || 0, summary: textOf(d.summary || []), model: d.model || '' }, time: event.time, seq: event.seq })
       if (S.current === s.id) scheduleRender(s)
+      break
+    }
+    case 'schedule/change': {
+      // 提醒变更（会话里建/删/改，或送达推进）：提醒中心缓存过期重拉；正在看就刷新
+      if (S.rem.loaded) { S.rem.at = 0; loadReminders(true) }
       break
     }
     case 'compaction/end': {
@@ -1512,6 +1518,8 @@ function renderList() {
     .sort((a, b) => b.updatedAt - a.updatedAt)
   // 同步分段控件的选中态
   document.querySelectorAll('.seg-btn').forEach((b) => { const on = b.dataset.mode === S.listMode; b.classList.toggle('sel', on); b.setAttribute('aria-pressed', on ? 'true' : 'false') })
+  // 提醒中心：第三档就地渲染（同屏切换，无中间页）；搜索时仍回落到会话结果
+  if (S.listMode === 'rem' && !q) { setListTitle('提醒'); renderRemList(wrap); return }
   setListTitle(null)  // 大标题默认「会话」；下钻工作区时再覆盖为工作区名
   if (S.todoMode) {
     visible = visible.filter(hasPending)
@@ -1676,6 +1684,206 @@ function snipNode(snippet, q) {
   }
   if (i < snippet.length) n.appendChild(document.createTextNode(snippet.slice(i)))
   return n
+}
+/* ================= 提醒中心（schedule/*） =================
+   数据：schedule/catalog（全量任务 + 原会话绑定，空参数）；详情里的送达记录走 schedule/history；
+   删除走 schedule/delete。宿主 Remote update 只支持改名/内容/时间（不支持暂停）——
+   「改时间」按已确认的 UX 回原会话让 agent 改，不在手机上填表单。 */
+function loadReminders(force) {
+  const R = S.rem
+  if (R.loading) return
+  if (!force && R.loaded && Date.now() - R.at < 30000) return
+  R.loading = true
+  rpc('schedule/catalog', {}).then((items) => {
+    R.items = Array.isArray(items) ? items : []
+    R.loaded = true
+    R.at = Date.now()
+  }).catch(() => {
+    /* 静默：拉不到就用旧数据；从未成功过则显示错误空态 */
+  }).finally(() => {
+    R.loading = false
+    if (S.listMode === 'rem') renderListSoon()
+  })
+}
+/* 人话时间：每天 08:30 / 每周一·三 09:00 / 每 30 分钟 / Cron 表达式 / 一次性「11月2日 14:00」 */
+function remWhenText(t) {
+  try {
+    if (t.kind === 'daily') return '每天 ' + remHM(t.time)
+    if (t.kind === 'weekly') {
+      const names = ['一', '二', '三', '四', '五', '六', '日']
+      return '每周' + (t.weekdays || []).map((w) => names[w - 1] || w).join('·') + ' ' + remHM(t.time)
+    }
+    if (t.kind === 'cron') return 'Cron ' + t.expression
+    if (t.kind === 'every') {
+      const s = t.everySeconds || 0
+      if (s < 3600) return '每 ' + Math.max(1, Math.round(s / 60)) + ' 分钟'
+      if (s < 86400) return '每 ' + Math.round(s / 3600) + ' 小时'
+      return '每 ' + Math.round(s / 86400) + ' 天'
+    }
+    const d = new Date(t.scheduledAt)
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + remHM(d.getHours() + ':' + d.getMinutes())
+  } catch (e) { return t.kind || '' }
+}
+function remHM(t) {
+  const p = String(t || '').split(':')
+  return (p[0] || '00') + ':' + (p[1] || '00')
+}
+/* 下次触发倒计时（只对 active 有意义；已结束的一次性任务没有下次） */
+function remNextText(t) {
+  if (t.status !== 'active') return null
+  const ms = new Date(t.scheduledAt).getTime() - Date.now()
+  if (!Number.isFinite(ms)) return null
+  if (ms <= 0) return '即将送达'
+  const m = Math.round(ms / 60000)
+  if (m < 60) return m + ' 分钟后'
+  const h = Math.floor(m / 60)
+  if (h < 24) return h + ' 小时后'
+  const d = new Date(t.scheduledAt)
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + remHM(d.getHours() + ':' + d.getMinutes())
+}
+function renderRemList(wrap) {
+  const R = S.rem
+  if (!R.loaded && R.loading) {
+    wrap.appendChild(el('div', 'empty-state', '正在加载提醒…'))
+    return
+  }
+  if (!R.loaded) {
+    const box = el('div', 'empty-state')
+    box.appendChild(el('div', null, '提醒还没加载出来'))
+    const retry = el('button', 'empty-clear', '重试')
+    retry.type = 'button'
+    retry.onclick = () => { loadReminders(true); renderList() }
+    box.appendChild(retry)
+    wrap.appendChild(box)
+    return
+  }
+  const items = [...R.items].sort((a, b) => {
+    // 活动的按下次触发排前；已结束的沉底
+    const ka = a.status === 'active' ? (new Date(a.scheduledAt).getTime() || 0) : Infinity
+    const kb = b.status === 'active' ? (new Date(b.scheduledAt).getTime() || 0) : Infinity
+    return ka - kb
+  })
+  if (!items.length) {
+    const box = el('div', 'empty-state')
+    box.appendChild(el('div', null, '还没有提醒'))
+    const teach = el('div', 'rem-teach')
+    teach.appendChild(el('div', 'rt-label', '在任意会话里对 agent 说一句'))
+    teach.appendChild(el('div', 'rt-bubble', '「每天早上 8 点把昨天的补货数据总结发我」'))
+    teach.appendChild(el('div', 'rt-note', '提醒由 agent 创建，到点自动把提示词发回那个会话'))
+    box.appendChild(teach)
+    wrap.appendChild(box)
+    return
+  }
+  const g = el('div', 'ws-group')
+  g.appendChild(icon('bolt', 14))
+  g.appendChild(el('span', null, '提醒（' + items.length + '）'))
+  wrap.appendChild(g)
+  for (const t of items) wrap.appendChild(remRow(t))
+}
+function remRow(t) {
+  const card = el('div', 'rem-card')
+  card.setAttribute('role', 'button')
+  card.setAttribute('tabindex', '0')
+  card.setAttribute('aria-label', '提醒：' + t.title + '，' + remWhenText(t))
+  const l1 = el('div', 'rem-l1')
+  const when = el('span', 'rem-when', remWhenText(t))
+  if (t.status !== 'active') when.classList.add('off')
+  l1.appendChild(when)
+  const next = remNextText(t)
+  if (next) l1.appendChild(el('span', 'rem-next', next))
+  else if (t.status !== 'active') l1.appendChild(el('span', 'rem-off-tag', '已结束'))
+  card.appendChild(l1)
+  card.appendChild(el('div', 'rem-title', t.title || ''))
+  const src = S.sessions.get(t.sessionId)
+  const l3 = el('div', 'rem-sub')
+  l3.appendChild(el('span', 'rem-src', '来自 · ' + (src ? sessTitle(src) : String(t.sessionId || '').slice(0, 8))))
+  if (t.lastDelivery && t.lastDelivery.deliveredAt) {
+    const d = new Date(t.lastDelivery.deliveredAt)
+    const today = new Date()
+    const same = d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()
+    l3.appendChild(el('span', 'rem-deliv', same ? '今天 ' + remHM(d.getHours() + ':' + d.getMinutes()) + ' 已送达' : (d.getMonth() + 1) + '月' + d.getDate() + '日已送达'))
+  }
+  card.appendChild(l3)
+  const open = () => { vibrate(8); openRemSheet(t) }
+  card.onclick = open
+  card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+  return card
+}
+/* 提醒详情单：元信息 + 最近送达（懒加载 history）+ 去原会话调整 / 删除（二次确认） */
+function openRemSheet(t) {
+  let ov = $('#rem-ov')
+  if (!ov) {
+    ov = el('div', 'sheet-overlay')
+    ov.id = 'rem-ov'
+    ov.innerHTML = '<div class="sheet q-sheet"><div class="grabber"></div><div class="qd-head"><span class="qd-title">提醒详情</span><span class="qd-cnt"></span><button class="think-close" id="rem-close" type="button" aria-label="关闭">✕</button></div><div class="qd-list" id="rem-list"></div></div>'
+    document.querySelector('#app').appendChild(ov)
+    ov.addEventListener('click', (e) => { if (e.target === ov) ovSet('rem-ov', false) })
+    $('#rem-close').onclick = () => ovSet('rem-ov', false)
+  }
+  const list = $('#rem-list')
+  list.textContent = ''
+  const row = (k, v) => { const r = el('div', 'rm-row'); r.appendChild(el('span', 'rm-k', k)); r.appendChild(el('span', 'rm-v', v)); return r }
+  list.appendChild(row('时间', remWhenText(t) + (t.status === 'active' && remNextText(t) ? '（下次 ' + remNextText(t) + '）' : '')))
+  list.appendChild(row('标题', t.title || ''))
+  if (t.prompt && t.prompt !== t.title) list.appendChild(row('内容', t.prompt))
+  if (t.timeZone) list.appendChild(row('时区', t.timeZone))
+  const src = S.sessions.get(t.sessionId)
+  const srcRow = row('来自会话', src ? sessTitle(src) : String(t.sessionId || '').slice(0, 8) + '…')
+  srcRow.classList.add('rm-link')
+  srcRow.onclick = () => { ovSet('rem-ov', false); goRemSession(t) }
+  list.appendChild(srcRow)
+  const hHead = el('div', 'rm-h', '最近送达')
+  list.appendChild(hHead)
+  const hBox = el('div', 'rm-hist', '加载中…')
+  list.appendChild(hBox)
+  rpc('schedule/history', { request: { sessionId: t.sessionId, id: t.id, limit: 10 } }).then((v) => {
+    hBox.textContent = ''
+    const recs = (v && Array.isArray(v.records) && v.records.length) ? v.records : null
+    if (!recs) { hBox.appendChild(el('div', 'rm-none', '还没有送达记录')); return }
+    for (const r of recs) {
+      const d = new Date(r.deliveredAt)
+      const item = el('div', 'rmh-item')
+      item.appendChild(el('span', 'rmh-t', (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + remHM(d.getHours() + ':' + d.getMinutes())))
+      item.appendChild(el('span', 'rmh-p', r.prompt ? (String(r.prompt).slice(0, 40) + (String(r.prompt).length > 40 ? '…' : '')) : '（旧回执无内容）'))
+      hBox.appendChild(item)
+    }
+  }).catch(() => { hBox.textContent = ''; hBox.appendChild(el('div', 'rm-none', '送达记录拉取失败')) })
+  const acts = el('div', 'rm-acts')
+  const go = el('button', 'rm-go', '去原会话调整时间')
+  go.type = 'button'
+  go.onclick = () => { ovSet('rem-ov', false); goRemSession(t) }
+  const del = el('button', 'rm-del', '删除提醒')
+  del.type = 'button'
+  del.onclick = async () => {
+    if (del.dataset.arm !== '1') { del.dataset.arm = '1'; del.textContent = '再点一次确认删除'; vibrate(12); return }
+    del.disabled = true
+    del.textContent = '删除中…'
+    try {
+      await rpc('schedule/delete', { request: { id: t.id, sessionId: t.sessionId } })
+      toast('提醒已删除 ✓')
+      S.rem.items = S.rem.items.filter((x) => x.id !== t.id)
+      ovSet('rem-ov', false)
+      renderListSoon()
+    } catch (e) { toast('删除失败：' + e.message, true); del.disabled = false; del.textContent = '删除提醒'; delete del.dataset.arm }
+  }
+  acts.appendChild(go)
+  acts.appendChild(del)
+  list.appendChild(acts)
+  list.appendChild(el('div', 'sheet-note', '提醒由 agent 在会话里创建；改时间/改内容回原会话说一声即可（agent 会调更新工具），删除在这里直接生效。'))
+  ovSet('rem-ov', true)
+}
+/* 回原会话并预填一句调整指令（光标置尾，直接补时间即可） */
+function goRemSession(t) {
+  location.hash = '#/s/' + t.sessionId
+  setTimeout(() => {
+    const inp = document.querySelector('#chat-input')
+    if (inp) {
+      inp.textContent = '把提醒「' + (t.title || '') + '」的时间改成 '
+      try { inp.focus() } catch (e) {}
+      const r = document.createRange(); r.selectNodeContents(inp); r.collapse(false)
+      const sel = window.getSelection(); if (sel) { sel.removeAllRanges(); sel.addRange(r) }
+    }
+  }, 500)
 }
 /* 工作区行：图标 + 名称 + 最新会话 · 右侧会话数/时间，点按下钻 */
 function wsRow(entry) {
@@ -5330,6 +5538,7 @@ function buildShell() {
       <div class="list-seg" id="list-seg" aria-label="列表排序方式">
         <button class="seg-btn" data-mode="time" type="button" aria-pressed="true">最近活跃</button>
         <button class="seg-btn" data-mode="workspace" type="button" aria-pressed="false">按工作区</button>
+        <button class="seg-btn" data-mode="rem" type="button" aria-pressed="false">提醒</button>
       </div>
       <div id="session-list"></div>
     </div>
@@ -5497,6 +5706,7 @@ function buildShell() {
       if (S.listMode === b.dataset.mode) return
       S.listMode = b.dataset.mode
       try { localStorage.setItem('dshm-list-mode', S.listMode) } catch (e) {}
+      if (S.listMode === 'rem') loadReminders()   // 提醒中心：切进来即刷新（TTL 内直接用缓存）
       renderList()
     }
   })

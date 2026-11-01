@@ -179,6 +179,50 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .glob-hit .gh-ws { font-size:11px; color:var(--text-3); }
 html.light .glob-hit .gh-snip mark { color:#2563eb; }
 .glob-none { text-align:center; padding: 4px 0 10px; }
+/* ---- 提醒中心 ---- */
+.rem-card {
+  margin: 0 12px 10px; padding: 13px 16px;
+  background: var(--bg-card); border-radius: 18px;
+  border: .5px solid var(--line);
+  display:flex; flex-direction:column; gap:6px;
+  cursor:pointer;
+}
+.rem-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rem-l1 { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.rem-when { font-size:13px; font-weight:600; color:var(--accent); font-variant-numeric: tabular-nums; }
+.rem-when.off { color: var(--text-3); font-weight: 500; }
+.rem-next { font-size:11.5px; color:var(--text-3); font-variant-numeric: tabular-nums; flex:none; }
+.rem-off-tag { font-size:11px; color:var(--text-3); border:1px solid var(--line); border-radius:7px; padding:1px 7px; flex:none; }
+.rem-title { font-size:15px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rem-sub { display:flex; align-items:center; gap:10px; min-width:0; }
+.rem-src { font-size:11.5px; color:var(--text-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rem-deliv { font-size:11.5px; color:var(--green); flex:none; }
+html.light .rem-when { color: #2563eb; }
+/* 空态教学气泡 */
+.rem-teach { margin-top:10px; display:flex; flex-direction:column; gap:8px; align-items:center; }
+.rt-label { font-size:12px; color:var(--text-3); }
+.rt-bubble {
+  background:var(--accent-fill); color:#fff; font-size:13.5px; line-height:1.5;
+  border-radius:16px 16px 16px 5px; padding:10px 14px; max-width:280px; text-align:left;
+}
+.rt-note { font-size:11.5px; color:var(--text-3); }
+/* 提醒详情单 */
+.rm-row { display:flex; gap:12px; padding:9px 16px 0; font-size:13px; }
+.rm-k { flex:none; width:64px; color:var(--text-3); }
+.rm-v { color:var(--text); min-width:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.rm-link .rm-v { color: var(--accent); }
+.rm-h { padding:16px 16px 4px; font-size:13px; font-weight:600; color:var(--text-3); }
+.rm-hist { padding:0 16px; display:flex; flex-direction:column; gap:7px; font-size:12.5px; color:var(--text-2); }
+.rmh-item { display:flex; gap:10px; align-items:baseline; min-width:0; }
+.rmh-t { flex:none; color:var(--text-3); font-variant-numeric: tabular-nums; }
+.rmh-p { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rm-none { color:var(--text-3); font-size:12.5px; }
+.rm-acts { display:flex; gap:10px; padding:16px 16px 4px; }
+.rm-acts button { flex:1; border:none; border-radius:12px; min-height:40px; font-family:var(--font); font-size:13.5px; font-weight:700; cursor:pointer; }
+.rm-go { background:var(--accent-fill); color:#fff; }
+.rm-del { background:rgba(255,69,58,.14); color:var(--red); }
+.rm-del:disabled { opacity:.55; }
+html.light .rm-del { background:rgba(255,69,58,.1); }
 .session-card .row1 { display:flex; align-items:center; gap:8px; }
 .session-card .s-title { font-size:16px; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .session-card .s-time { font-size:12px; color:var(--text-3); flex:none; font-variant-numeric: tabular-nums; }
