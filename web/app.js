@@ -695,6 +695,20 @@ function foldEvent(s, event, view) {
       if (S.rem.loaded) { S.rem.at = 0; loadReminders(true) }
       break
     }
+    case 'deliverables/presented': {
+      // 交付物：present 工具成功后宿主追加的持久事件（files[].path 为工作区绝对路径）
+      const files = (d.files || []).filter((f) => f && f.path)
+      if (files.length) {
+        s.items.push({ kind: 'dels', files, turn: d.turn, seq: event.seq, time: event.time })
+        if (S.current === s.id) { scheduleRender(s); updateDelsStrip(s) }
+      }
+      break
+    }
+    case 'workspace/changes': {
+      // 本轮有文件改动（明细在宿主内存里，仅活会话可查）——工作区文件单顶部给入口
+      s._wsChanged = { turn: d.turn, seq: event.seq }
+      break
+    }
     case 'compaction/end': {
       if (d && d.error) s.items.push({ kind: 'sys', text: '⚠ 自动压缩失败：' + d.error, time: event.time, seq: event.seq })
       break
@@ -1290,6 +1304,7 @@ function itemNodeInner(s, item) {
       return m
     }
     case 'tool': return toolNode(item)
+    case 'dels': return delsNode(s, item)
     case 'gap': {
       // seek 跳转留下的未加载段：滚动靠近会自动补齐（fillGap），行本身只是个轻占位
       const g = el('div', 'gap-row', '· 这一段还没加载 ·')
@@ -1884,6 +1899,318 @@ function goRemSession(t) {
       const sel = window.getSelection(); if (sel) { sel.removeAllRanges(); sel.addRange(r) }
     }
   }, 500)
+}
+/* ================= 交付物 + 工作区文件 =================
+   交付物来自持久事件 deliverables/presented（files[].path 为宿主绝对路径）；
+   文件字节走 GET /api/file?path=<abs>（同源 cookie 鉴权，20MiB 上限，mime 按扩展名）；
+   「在 Mac 上打开」走 POST /api/present.open?sessionId&seq&index（交付物专用，旧会话可用）；
+   工作区浏览走 workspaceFiles/{list,stat,read}（首参 wire 名 workspaceFileScopeId = 会话 id）；
+   workspace/changes 的明细（/api/changes.summary）只在会话还活着时可查，404 就地降级。 */
+const EXT_TEXT = new Set(['md', 'txt', 'json', 'js', 'ts', 'mjs', 'css', 'csv', 'log', 'xml', 'yml', 'yaml', 'sh', 'py', 'html', 'htm', 'svg'])
+const EXT_IMG = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'ico', 'bmp'])
+function extOf(p) { const m = String(p || '').split('/').pop().match(/\.([A-Za-z0-9]+)$/); return m ? m[1].toLowerCase() : '' }
+function extLabel(ext) {
+  if (!ext) return 'FILE'
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return 'XLS'
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'ico', 'bmp'].includes(ext)) return 'IMG'
+  if (['html', 'htm'].includes(ext)) return 'HTM'
+  if (ext === 'pdf') return 'PDF'
+  if (ext === 'md') return 'MD'
+  if (['doc', 'docx', 'ppt', 'pptx'].includes(ext)) return 'DOC'
+  if (['json', 'js', 'ts', 'py', 'sh', 'yml', 'yaml', 'css', 'xml'].includes(ext)) return 'CODE'
+  return ext.slice(0, 4).toUpperCase()
+}
+function fmtBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1048576).toFixed(1) + ' MB'
+}
+/* 时间线交付物卡：一组 = 一次 present 调用 */
+function delsNode(s, item) {
+  const card = el('div', 'dels-card')
+  const head = el('div', 'dels-head')
+  head.appendChild(el('span', 'dls-ico', '📦'))
+  head.appendChild(el('span', 'dels-h-t', '交付物 · ' + item.files.length + ' 个文件'))
+  card.appendChild(head)
+  item.files.forEach((f, i) => {
+    const row = el('div', 'del-file')
+    row.setAttribute('role', 'button')
+    row.setAttribute('tabindex', '0')
+    row.setAttribute('aria-label', '交付物：' + f.path)
+    const chip = el('span', 'ext-chip ' + extChipClass(extOf(f.path)), extLabel(extOf(f.path)))
+    row.appendChild(chip)
+    const mid = el('div', 'df-mid')
+    mid.appendChild(el('div', 'df-name', String(f.path).split('/').pop()))
+    if (f.description) mid.appendChild(el('div', 'df-desc', f.description))
+    row.appendChild(mid)
+    row.appendChild(el('span', 'df-go', '›'))
+    const open = () => { vibrate(8); openFilePreview(s, { absPath: f.path, name: String(f.path).split('/').pop(), desc: f.description || '', origin: { seq: item.seq, index: i } }) }
+    row.onclick = open
+    row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+    card.appendChild(row)
+  })
+  return card
+}
+function extChipClass(ext) {
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return 'c-xls'
+  if (EXT_IMG.has(ext)) return 'c-img'
+  if (['html', 'htm'].includes(ext)) return 'c-htm'
+  if (ext === 'pdf') return 'c-pdf'
+  if (ext === 'md') return 'c-md'
+  return ''
+}
+/* 标题下交付物条：有交付物才出现，点开总清单 */
+function updateDelsStrip(s) {
+  const strip = document.getElementById('dels-strip')
+  if (!strip) return
+  const n = s.items.filter((x) => x.kind === 'dels').reduce((a, x) => a + x.files.length, 0)
+  strip.style.display = n ? '' : 'none'
+  if (n) strip.textContent = '📦 交付物 · ' + n + ' 个文件'
+  strip.onclick = () => { vibrate(8); openDelsListSheet(s) }
+}
+function openDelsListSheet(s) {
+  ensureOvSheet('dells-ov', '交付物', 'dells-list')
+  const list = $('#dells-list')
+  list.textContent = ''
+  let n = 0
+  for (const it of s.items) {
+    if (it.kind !== 'dels') continue
+    it.files.forEach((f, i) => {
+      n++
+      const row = el('div', 'del-file')
+      const chip = el('span', 'ext-chip ' + extChipClass(extOf(f.path)), extLabel(extOf(f.path)))
+      row.appendChild(chip)
+      const mid = el('div', 'df-mid')
+      mid.appendChild(el('div', 'df-name', String(f.path).split('/').pop()))
+      if (f.description) mid.appendChild(el('div', 'df-desc', f.description))
+      row.appendChild(mid)
+      row.onclick = () => { vibrate(8); ovSet('dells-ov', false); openFilePreview(s, { absPath: f.path, name: String(f.path).split('/').pop(), desc: f.description || '', origin: { seq: it.seq, index: i } }) }
+      list.appendChild(row)
+    })
+  }
+  if (!n) list.appendChild(el('div', 'rm-none', '本会话还没有交付物——让 agent 用 present 工具交付文件即可出现在这里'))
+  ovSet('dells-ov', true)
+}
+/* 通用临时浮层（qd-sheet 同构）：不存在则建 */
+function ensureOvSheet(id, title, listId) {
+  let ov = document.getElementById(id)
+  if (!ov) {
+    ov = el('div', 'sheet-overlay')
+    ov.id = id
+    ov.innerHTML = '<div class="sheet q-sheet"><div class="grabber"></div><div class="qd-head"><span class="qd-title">' + title + '</span><span class="qd-cnt"></span><button class="think-close" data-ov-close="' + id + '" type="button" aria-label="关闭">✕</button></div><div class="qd-list" id="' + listId + '"></div></div>'
+    document.querySelector('#app').appendChild(ov)
+    ov.addEventListener('click', (e) => { if (e.target === ov) ovSet(id, false) })
+    ov.querySelector('[data-ov-close]').onclick = () => ovSet(id, false)
+  }
+  return ov
+}
+/* 文件预览单：图片内联（/api/file → blob），文本读首页（workspaceFiles/read），二进制只给动作。
+   origin（交付物）专享「在 Mac 上打开」（present.open）；工作区文件用 openWorkspacePath。 */
+function openFilePreview(s, opts) {
+  ensureOvSheet('fp-ov', '文件', 'fp-list')
+  const list = $('#fp-list')
+  list.textContent = ''
+  const ext = extOf(opts.absPath)
+  const meta = el('div', 'fp-meta')
+  meta.appendChild(el('span', 'ext-chip ' + extChipClass(ext), extLabel(ext)))
+  const m2 = el('div', 'fp-mid')
+  m2.appendChild(el('div', 'fp-name', opts.name))
+  m2.appendChild(el('div', 'fp-path', opts.absPath))
+  if (opts.desc) m2.appendChild(el('div', 'fp-desc', opts.desc))
+  meta.appendChild(m2)
+  list.appendChild(meta)
+  const body = el('div', 'fp-body', '加载预览…')
+  list.appendChild(body)
+  const renderPreview = (kind, data) => {
+    body.textContent = ''
+    if (kind === 'img') {
+      const url = URL.createObjectURL(data)
+      const img = el('img', 'fp-img')
+      img.src = url
+      img.alt = opts.name
+      body.appendChild(img)
+      body.classList.add('fit-img')
+    } else if (kind === 'text') {
+      const pre = el('div', 'fp-text', data)
+      body.appendChild(pre)
+      if (!opts._eof) body.appendChild(el('div', 'fp-more', opts._truncated ? '（内容较长，仅显示开头部分）' : ''))
+    } else {
+      body.appendChild(el('div', 'fp-none', '这类文件不做内联预览——可以直接分享，或在 Mac 上打开'))
+    }
+  }
+  const loadPreview = () => {
+    if (EXT_IMG.has(ext)) {
+      fetch('/api/file?path=' + encodeURIComponent(opts.absPath), { credentials: 'same-origin' }).then((r) => {
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return r.blob()
+      }).then((b) => renderPreview('img', b)).catch((e) => {
+        body.textContent = ''
+        body.appendChild(el('div', 'fp-none', '预览加载失败（' + e.message + '）'))
+      })
+    } else if (EXT_TEXT.has(ext)) {
+      rpc('workspaceFiles/read', { workspaceFileScopeId: s.id, path: opts.wsPath || relPathOf(s, opts.absPath) }).then((v) => {
+        renderPreview('text', (v && v.text) || '')
+      }).catch((e) => {
+        body.textContent = ''
+        body.appendChild(el('div', 'fp-none', '文本读取失败（' + e.message + '）'))
+      })
+    } else renderPreview('none')
+  }
+  loadPreview()
+  const acts = el('div', 'rm-acts')
+  const share = el('button', 'rm-go', '分享 / AirDrop')
+  share.type = 'button'
+  share.onclick = async () => {
+    share.disabled = true
+    try {
+      const r = await fetch('/api/file?path=' + encodeURIComponent(opts.absPath), { credentials: 'same-origin' })
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      const blob = await r.blob()
+      const file = new File([blob], opts.name, { type: blob.type || 'application/octet-stream' })
+      if (!(navigator.canShare && navigator.canShare({ files: [file] }))) throw new Error('此环境不支持分享文件')
+      await navigator.share({ files: [file], title: opts.name })
+    } catch (e) {
+      const msg = String((e && e.message) || e)
+      toast(/分享|share/i.test(msg) && /abort/i.test(msg) ? '已取消分享' : '分享失败：' + msg, !/abort/i.test(msg))
+    }
+    share.disabled = false
+  }
+  const mac = el('button', 'rm-del fp-mac', '在 Mac 上打开')
+  mac.type = 'button'
+  mac.onclick = async () => {
+    mac.disabled = true
+    try {
+      if (opts.origin) {
+        const q = '/api/present.open?sessionId=' + encodeURIComponent(s.id) + '&seq=' + encodeURIComponent(opts.origin.seq) + '&index=' + encodeURIComponent(opts.origin.index)
+        const r = await fetch(q, { method: 'POST', credentials: 'same-origin' })
+        if (r.status === 204) toast('已在 Mac 上打开 ✓')
+        else if (r.status === 404) toast('这条交付物记录已失效（文件可能被移动）', true)
+        else toast('打开失败（HTTP ' + r.status + '）', true)
+      } else {
+        await rpc('session/openWorkspacePath', { request: { path: opts.absPath } })
+        toast('已在 Mac 上打开 ✓')
+      }
+    } catch (e) { toast('打开失败：' + ((e && e.message) || e), true) }
+    mac.disabled = false
+  }
+  acts.appendChild(share)
+  acts.appendChild(mac)
+  list.appendChild(acts)
+  ovSet('fp-ov', true)
+}
+/* 宿主绝对路径 → 工作区相对（workspaceFiles/read 要相对路径；deliverables 给的是绝对路径） */
+function relPathOf(s, absPath) {
+  const cwd = s.cwd || ''
+  if (cwd && String(absPath).startsWith(cwd + '/')) return String(absPath).slice(cwd.length + 1)
+  if (cwd && String(absPath).startsWith(cwd)) return String(absPath).slice(cwd.length).replace(/^\//, '')
+  return String(absPath).replace(/^\//, '')
+}
+/* 工作区文件单：面包屑 + 目录浏览（workspaceFiles/list）；点文件 stat 拿绝对路径后走统一预览 */
+function openWsSheet(s) {
+  ensureOvSheet('ws-ov', '工作区文件', 'ws-list')
+  ovSet('ws-ov', true)
+  const list = $('#ws-list')
+  let cwd = '.'
+  const bc = el('div', 'ws-bc')
+  const body = el('div', 'ws-body', '加载中…')
+  list.textContent = ''
+  list.appendChild(bc)
+  list.appendChild(body)
+  const load = () => {
+    body.textContent = '加载中…'
+    rpc('workspaceFiles/list', { workspaceFileScopeId: s.id, path: cwd }).then((v) => {
+      body.textContent = ''
+      renderBc()
+      const entries = (v && v.entries) || []
+      const dirs = entries.filter((e2) => e2.type === 'directory').sort((a, b) => a.name.localeCompare(b.name))
+      const files = entries.filter((e2) => e2.type === 'file').sort((a, b) => a.name.localeCompare(b.name))
+      if (!entries.length) body.appendChild(el('div', 'rm-none', '这个目录是空的'))
+      for (const e2 of dirs) {
+        const row = el('div', 'wse-row')
+        row.appendChild(el('span', 'wse-ico', '📁'))
+        row.appendChild(el('span', 'wse-name', e2.name))
+        row.appendChild(el('span', 'wse-side', '›'))
+        row.onclick = () => { vibrate(6); cwd = cwd === '.' ? e2.name : cwd + '/' + e2.name; load() }
+        body.appendChild(row)
+      }
+      for (const e2 of files) {
+        const row = el('div', 'wse-row')
+        const ext = extOf(e2.name)
+        row.appendChild(el('span', 'ext-chip mini ' + extChipClass(ext), extLabel(ext)))
+        row.appendChild(el('span', 'wse-name', e2.name))
+        row.appendChild(el('span', 'wse-side', fmtBytes(e2.size)))
+        row.onclick = () => {
+          vibrate(6)
+          const p = cwd === '.' ? e2.name : cwd + '/' + e2.name
+          rpc('workspaceFiles/stat', { workspaceFileScopeId: s.id, path: p }).then((st) => {
+            openFilePreview(s, { absPath: (st && st.absolutePath) || p, name: e2.name, desc: '', wsPath: p })
+          }).catch(() => {
+            openFilePreview(s, { absPath: p, name: e2.name, desc: '', wsPath: p })
+          })
+        }
+        body.appendChild(row)
+      }
+      if (v && v.truncated) body.appendChild(el('div', 'rm-none', '条目太多，已截断'))
+    }).catch((e) => {
+      body.textContent = ''
+      const box = el('div', 'rm-none', '读取失败：' + ((e && e.message) || e))
+      body.appendChild(box)
+    })
+  }
+  const renderBc = () => {
+    bc.textContent = ''
+    const root = el('span', 'ws-bc-seg', '工作区')
+    root.onclick = () => { cwd = '.'; load() }
+    bc.appendChild(root)
+    if (cwd !== '.') {
+      const parts = cwd.split('/')
+      let acc = ''
+      parts.forEach((p, i) => {
+        acc = acc ? acc + '/' + p : p
+        const seg = el('span', 'ws-bc-seg', p)
+        seg.onclick = () => { cwd = acc; load() }
+        bc.appendChild(el('span', 'ws-bc-sep', '/'))
+        bc.appendChild(seg)
+      })
+    }
+  }
+  /* 本轮改动条（明细只对活会话有效，404 静默降级为提示文案） */
+  if (s._wsChanged && s._wsChanged.seq != null) {
+    const strip = el('div', 'ws-chg')
+    strip.appendChild(el('span', null, '第 ' + s._wsChanged.turn + ' 轮改动了文件'))
+    const btn = el('button', 'ws-chg-btn', '查看明细')
+    btn.type = 'button'
+    btn.onclick = () => {
+      btn.disabled = true
+      fetch('/api/changes.summary?sessionId=' + encodeURIComponent(s.id) + '&seq=' + encodeURIComponent(s._wsChanged.seq), { credentials: 'same-origin' }).then((r) => {
+        if (r.status === 404) throw new Error('明细已不可用（会话结束后宿主不再保留）')
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return r.json()
+      }).then((v) => {
+        const paths = []
+        const dig = (x) => {
+          if (!x) return
+          if (typeof x === 'string') { if (x.includes('/')) paths.push(x); return }
+          if (Array.isArray(x)) { x.forEach(dig); return }
+          if (typeof x === 'object') { if (typeof x.path === 'string') paths.push(x.path); else Object.values(x).forEach(dig) }
+        }
+        dig(v)
+        strip.textContent = ''
+        if (paths.length) {
+          strip.appendChild(el('span', null, '改动 ' + paths.length + ' 个文件：'))
+          paths.slice(0, 3).forEach((p) => strip.appendChild(el('span', 'ws-chg-p', String(p).split('/').pop())))
+          if (paths.length > 3) strip.appendChild(el('span', null, '等'))
+        } else strip.appendChild(el('span', null, '本轮有文件改动'))
+      }).catch((e) => {
+        strip.textContent = ''
+        strip.appendChild(el('span', null, String((e && e.message) || e)))
+      })
+    }
+    strip.appendChild(btn)
+    list.insertBefore(strip, body)
+  }
+  load()
 }
 /* 工作区行：图标 + 名称 + 最新会话 · 右侧会话数/时间，点按下钻 */
 function wsRow(entry) {
@@ -3084,6 +3411,7 @@ function reloadCurrent() {
 }
 function refreshChatChrome(s) {
   renderGoalBanner(s)   // 目标横幅：进会话与状态刷新时同步
+  updateDelsStrip(s)    // 交付物条：进会话与 present 事件到达时同步
   const off = S.connState !== 'online'
   const input = $('#chat-input')
   if (input) {
@@ -4611,6 +4939,8 @@ function renderSheet(s) {
     const st = todoStats(s)
     c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
   }
+  // ---- 工作区文件（浏览 agent 的工作目录；交付物/产出都能看）----
+  c.appendChild(valueRow('工作区文件', '浏览这个会话的目录 · 预览 / 分享', '', () => { closeSheet(); openWsSheet(s) }))
   // ---- 模型 ----
   c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
   // ---- 权限 ----
@@ -5557,6 +5887,7 @@ function buildShell() {
       <span class="tb-cnt" id="tb-cnt"></span>
       <span class="tb-track"><i class="tb-fill" id="tb-fill"></i></span>
     </div>
+    <button class="dels-strip" id="dels-strip" type="button" aria-label="查看本会话的交付物" style="display:none"></button>
     <div class="goal-bar" id="goal-bar" role="button" tabindex="0" aria-label="目标" style="display:none"></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <button class="q-handle" id="q-handle" type="button" aria-label="问过的问题" aria-expanded="false"><span class="qh-ic" data-ic="qlist"></span></button>
