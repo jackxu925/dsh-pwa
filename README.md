@@ -29,7 +29,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 
 ## Features
 
-- 📋 **Session list** with workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and rename / fork / archive
+- 📋 **Session list** with last-message previews, unread dots, day grouping, workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and rename / fork / archive
 - 🔎 **Global search**: local title/path filtering plus full-text message search (`session/search`) with highlighted snippets that jump straight to the session
 - 💬 **Streaming chat**: optimistic send, per-day dividers, timestamps, code-copy buttons, full-screen image viewer; dual send modes — queue while running, long-press to steer — and queued messages can be edited / steered / removed
 - ✅ Approvals & ❓ agent questions as tappable cards (dangerous commands get a red double-confirm)
@@ -44,7 +44,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 📳 Haptics, dark/light themes, draft autosave per session, connection-status pill with manual reconnect
 - ⚙️ Desktop GUI gets a *Settings → 手机端* entry showing the phone URL + copy button (no typing URLs on a phone keyboard)
 
-The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 142 items, all fixed, each with the root cause.
+The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 145 items, all fixed, each with the root cause.
 
 ## Quick start
 

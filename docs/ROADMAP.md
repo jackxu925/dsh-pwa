@@ -4,7 +4,7 @@ Good first issues live here. Everything below is grounded in real usage and the 
 
 ## P0 — high value, self-contained
 
-1. **Last-message preview + unread counts in the session list.** Right now a cold list only shows `cwd`. Needs `session/list` to carry a preview (or a cheap follow-up call per visible row). Design: one-line muted preview + unread dot, no layout shift.
+1. **Cold-session previews + unread counts.** The PWA now renders the last-message preview from the host's `turnOutline` projection when present, groups the time view by day, and shows unread dots. Sessions without a live projection still fall back to their workspace name, and unread is still a dot rather than a count. Needs a cached preview (or a cheap per-row tail read) for those cold sessions.
 2. **Session management on mobile.** Long-press a session card → sheet with Archive / Rename / Delete. Needs the host to expose these mutations to the mobile surface.
 3. **Cancel / edit queued messages.** The queue chip shows what's waiting; users can't take anything back. Cancel is the 80% case, edit is the stretch.
 
