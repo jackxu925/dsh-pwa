@@ -180,6 +180,7 @@
 | 61 | 空输入长按发送：震动 + toast「本次将插话发送」后 `doSend` 空输入静默早退——被提示却什么都没发 | 定时器回调先判空（文本 + pendingImages），为空直接取消：不震动、不提示、不发。实证见 `verify/REPORT.md`（T7/T7b） | ✅ |
 | 62 | 打开/关闭「排队操作单」各抛一次 `Cannot read properties of null (reading 'classList')`：`openQSheet`/`closeQSheet` 取 `$('#q-sheet')`，但 buildShell 静态结构里该节点只有 class 没有 id（会话菜单的 `sess-sheet` 是有 id 的，此处漏加）。抽屉滑入靠 `.sheet-overlay.open .sheet` 后代选择器，视觉碰巧正常，异常一直静默 | 节点补 `id="q-sheet"`。鼠标路径验证（`verify/mouse-click.mjs` M13/M15）首次捕获并实证，修复后全程零 pageerror | ✅ |
 | 141 | 权限弹窗一直「加载中…」，点进去只有「暂不可用（会话历史加载后显示）」，无法选择任何权限（用户反馈，复现：进会话 → 右上角 ⋯） | 根因：宿主新版把可选权限目录挪到进程级 Remote，`permissions` 会话投影只剩 `{currentValue}`；前端仍只认 `values.permissions.options`，投影永远落不了地。修：两个投影入口改为接受 `{currentValue}`（旧版自带 `options` 的宿主继续兼容）；⋯ 菜单打开时按需拉 `permissionPresets/catalog` 取选项，菜单/已打开面板异步刷新；切换权限后仍乐观更新并用 `session/list` 对齐；补 `auto` / `custom` 中文标签 | ✅ |
+| 142 | 首页三个分段 Tab 的宽度与下方列表卡片不一致（用户反馈：Tab 整条铺满屏幕两侧，卡片左右各留 12px，不美观） | 根因：`.list-seg` 同时写了 `margin: 10px 16px` 与 `width:100%; margin-left/right:auto`——auto 把侧边距覆盖成 0，且 780px 上限与卡片列（`.swipe-wrap` 756px）不同。修：分段控件改 `margin:10px 12px 6px; max-width:756px`，≥700px 时与卡片同规则自动居中；`#session-list` 限宽 780px 居中，让最近活跃卡片、工作区行、提醒卡统一落在 756px 内容列（两侧 12px）。实测 390px / 1024px、三种视图：Tab 与列表项左右边缘逐像素相等（12–378 / 134–890），无横向溢出 | ✅ |
 
 ## 仍需协议/服务端配合（本轮未动）
 

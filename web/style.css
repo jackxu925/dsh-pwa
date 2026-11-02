@@ -130,11 +130,15 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .ws-group { padding: 18px 16px 8px; font-size:13px; color:var(--text-3); font-weight:600; letter-spacing:.3px; display:flex; align-items:center; gap:7px; max-width: 780px; margin: 0 auto; width: 100%; }
 
 /* 列表视图切换：最近活跃平铺 / 按工作区分组 */
+/* 三种列表（会话卡/工作区行/提醒卡）统一在 780px 内容列内，卡片左右各 12px → 756px；
+   上方分段控件按同一列宽对齐（见 .list-seg） */
+#session-list { max-width: 780px; margin: 0 auto; }
 .list-seg {
-  display:flex; gap:4px; margin: 10px 16px 6px;
+  display:flex; gap:4px; margin: 10px 12px 6px;
   background: var(--bg-card); border-radius: 11px; padding: 3px;
-  max-width: 780px; margin-left:auto; margin-right:auto; width: 100%;
+  max-width: 756px;  /* 与会话卡（.swipe-wrap）同一内容列：12px 侧边距，宽屏同样 756px 居中 */
 }
+@media (min-width:700px) { .list-seg { margin-left:auto; margin-right:auto; } }
 .seg-btn {
   flex:1; min-height: 34px; border:none; border-radius: 9px;
   background:transparent; color:var(--text-3); font-size:13.5px; font-weight:600;
