@@ -284,6 +284,9 @@ const S = {
   glob: { q: '', seq: 0, timer: 0, loading: false, error: false, results: [], hasMore: false },  // 全局搜索（session/search 搜消息内容）
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
+  permCatalog: null,        // 进程级权限目录（permissionPresets/catalog）：选项不在会话投影里
+  _permCatalogLoading: false,
+  _permCatalogError: null,
 }
 function sess(id) {
   let s = S.sessions.get(id)
@@ -300,7 +303,7 @@ function sess(id) {
       questions: new Map(),            // eventId → {rpcId, questions, outcome}
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
-      permissions: null,               // {options:[{value,name,description?}], currentValue}
+      permissions: null,               // 宿主投影 {currentValue}；旧版宿主可能自带 options
       models: null,                    // session/modelCatalog 缓存
       modelSel: null,                  // 当前模型选择 {provider,model,reasoningEffort}（modelSelection.next）
       imageLimits: null,               // imageLimits 投影
@@ -2490,7 +2493,10 @@ function applyListValues(s, values) {
     // header 会一直卡在 openSession 那一刻读到的"新会话"）
     if (changed && S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = sessTitle(s) }
   }
-  if (values.permissions && Array.isArray(values.permissions.options)) s.permissions = values.permissions
+  if (values.permissions && (typeof values.permissions.currentValue === 'string' || Array.isArray(values.permissions.options))) {
+    s.permissions = { ...(s.permissions || {}), ...values.permissions }
+    if (sheetSession === s.id) refreshSheetViews(s)
+  }
   if ('goal' in values) {
     const prev = s.goal
     s.goal = values.goal || null   // null＝目标已清除
@@ -3100,8 +3106,8 @@ function applyProjection(s, values) {
     renderListSoon()
     if (S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = sessTitle(s) }
   }
-  if (values.permissions && Array.isArray(values.permissions.options)) {
-    s.permissions = values.permissions
+  if (values.permissions && (typeof values.permissions.currentValue === 'string' || Array.isArray(values.permissions.options))) {
+    s.permissions = { ...(s.permissions || {}), ...values.permissions }
     if (sheetSession === s.id) refreshSheetViews(s)
   }
   if (values.modelSelection && values.modelSelection.next) {
@@ -4825,6 +4831,29 @@ function openSheet(s) {
   renderSheet(s)
   ovSet('sheet-overlay', true)
   if (!s.models) loadModels(s)
+  if (!permOptionsOf(s)) loadPermCatalog()
+}
+/* 宿主的 permissions 投影只有 currentValue；可选值来自进程级目录 Remote（旧版宿主才在投影里带 options） */
+function loadPermCatalog() {
+  if (S.permCatalog || S._permCatalogLoading) return
+  S._permCatalogLoading = true
+  S._permCatalogError = null
+  rpc('permissionPresets/catalog', {})
+    .then((v) => {
+      if (!v || !Array.isArray(v.options)) throw new Error('权限目录为空')
+      S.permCatalog = v
+    })
+    .catch((e) => { S._permCatalogError = e.message || '加载失败' })
+    .finally(() => {
+      S._permCatalogLoading = false
+      const s = sheetSession && S.sessions.get(sheetSession)
+      if (s) refreshSheetViews(s)
+    })
+}
+function permOptionsOf(s) {
+  if (s && s.permissions && Array.isArray(s.permissions.options) && s.permissions.options.length) return s.permissions.options
+  if (S.permCatalog && Array.isArray(S.permCatalog.options)) return S.permCatalog.options
+  return null
 }
 function ovSet(id, open) {
   const ov = document.getElementById(id)
@@ -4905,7 +4934,8 @@ async function applyPermission(s, opt) {
     if (v.result && v.result.kind !== 'success') { toast(v.result.text || '切换失败', true); return }
     // 修「提示成功但界面没动」：control 流不一定广播该投影，先乐观更新 ✓，
     // 再用 session/list（唯一事实源）对齐真实值
-    if (s.permissions) { s.permissions = { ...s.permissions, currentValue: opt.value }; refreshSheetViews(s) }
+    s.permissions = { ...(s.permissions || {}), currentValue: opt.value }
+    refreshSheetViews(s)
     toast('权限已切换：' + permLabel(opt.value))
     loadBaseSoon()
   } catch (e) { toast('切换失败：' + e.message, true) }
@@ -5639,8 +5669,15 @@ function renderPermPanel(s) {
   if (!body) return
   body.textContent = ''
   const perms = s.permissions
-  if (!perms) body.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）'))
-  else for (const opt of perms.options) body.appendChild(permRow(s, opt, perms.currentValue))
+  if (!perms) { body.appendChild(el('div', 'sheet-note', '暂不可用（会话历史加载后显示）')); return }
+  const options = permOptionsOf(s)
+  if (!options) {
+    loadPermCatalog()
+    body.appendChild(el('div', 'sheet-note', S._permCatalogError ? '权限选项加载失败：' + S._permCatalogError : '加载中…'))
+    return
+  }
+  if (!options.length) { body.appendChild(el('div', 'sheet-note', '暂无可选权限')); return }
+  for (const opt of options) body.appendChild(permRow(s, opt, perms.currentValue))
 }
 /* ---- 运行中发送面板 ---- */
 function openSendPanel(s) {
@@ -5758,6 +5795,8 @@ const PERM_LABEL = {
   'read-only': ['只读', '只能读文件与检索，不能改动任何东西'],
   'workspace-write': ['工作区写入', '可在工作区内读写文件、执行命令'],
   'danger-full-access': ['完全访问', '不做限制，含工作区外的读写与危险命令'],
+  'auto': ['自动审查', '无沙箱运行；每次原生工具调用和 PTC 内层调用前由同一模型进行实验性审查'],
+  'custom': ['自定义', '当前沙箱与审批设置没有匹配任何预设'],
 }
 const permLabel = (v) => (PERM_LABEL[v] ? PERM_LABEL[v][0] : v)
 const permDesc = (opt) => (PERM_LABEL[opt.value] ? PERM_LABEL[opt.value][1] : (opt.description || ''))
