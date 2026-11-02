@@ -1127,10 +1127,13 @@ function skeletonNode() {
 function renderChat(s, forceScroll) {
   if (S.current !== s.id) return
   // 幽灵清扫：double-steer / 事件先到等竞态下留下的「永远插话中」回显——
-  // 只要同文本已有落地消息，这条回显就是鬼，删掉（通常列表里没有 steerEcho，零开销）
+  // 同文本已有落地消息的删掉；既无原文又无图片的空回显（旧竞态产物）永远对不上事件，也直接清掉
   if (s.items.some((x) => x.steerEcho)) {
     const settled = s.items.filter((x) => x.kind === 'user' && !x.steerEcho && !x.pending).map((x) => (x.text || '').slice(0, 24))
-    s.items = s.items.filter((x) => !(x.steerEcho && (x.text || '').slice(0, 24) !== '' && settled.includes((x.text || '').slice(0, 24))))
+    s.items = s.items.filter((x) => !(x.steerEcho && (
+      (!x.text && !(x.images && x.images.length)) ||
+      ((x.text || '').slice(0, 24) !== '' && settled.includes((x.text || '').slice(0, 24)))
+    )))
   }
   const sc = chatScrollEl()
   if (!sc) return
@@ -3435,7 +3438,11 @@ Mux.handlers.follow = (v, meta) => {
     s._thinkBuf = ''
     const records = v.records || []
     for (const rec of records) foldEvent(s, rec.event || rec)
-    for (const p of pend) if (!s.items.some((i) => i.rpcId === p.rpcId)) s.items.push(p)
+    for (const p of pend) {
+      if (!p.rpcId && !p.text && !(p.images && p.images.length)) continue   // 无身份也无内容的老幽灵：不再续命
+      if (p.rpcId && s.items.some((i) => i.rpcId === p.rpcId)) continue
+      s.items.push(p)
+    }
     s.hasMore = !!v.hasMore
     s.oldestSeq = records.length ? (records[0].event || records[0]).seq : null
     applyProjection(s, v.projections && v.projections.values)
@@ -4125,11 +4132,19 @@ function openQSheet(s, q) {
       // 乐观上屏（桌面同款语义）：宿主要等 agent 消费才产生 user/message 事件，
       // 在此之前 chip 就该消失、消息就该出现在对话流里，等到持久事件再就地转正
       const qi = (s.queue || []).findIndex((x) => x.id === itemId)
-      const qm = qi >= 0 ? s.queue[qi] : null
+      // 竞态兜底：inbox 投影（或 agent 直接领取）可能先于本 RPC 回包把条目移出 s.queue——
+      // 此时绝不能拿空 content 上屏，否则留下一条没有 rpcId、永远转不了正的「插话中…」空气泡
+      const qm = qi >= 0 ? s.queue[qi] : q
       if (qi >= 0) s.queue.splice(qi, 1)
       const content = (qm && qm.message && qm.message.content) || []
       const text = textOf(content)
       const images = imageBlocksOf(content)
+      if (!text && !images.length) {   // 拿不到原文：只收队列条，不发空回显（等持久事件自己落流）
+        toast('已转为插话 ⚡')
+        closeQSheet()
+        renderQueueStrip(s)
+        return
+      }
       // 防幽灵：同一文本若已落地（事件先到）或已有待转正回显（重复点插话），不再回显第二次
       const t24 = (text || '').slice(0, 24)
       if (t24 && s.items.some((x) => x.kind === 'user' && (x.text || '').slice(0, 24) === t24)) {
