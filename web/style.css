@@ -786,6 +786,37 @@ html.light .sheet { box-shadow:0 -12px 44px rgba(15,23,42,.18); }
 /* 紧凑模型行 */
 .sheet-row.model-row { min-height:44px; padding:10px 14px; }
 .sheet-row.model-row .r-name { font-size:14px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* ---- ⋯ 菜单：标题栏 + 会话身份卡（Session ID / 路径可直接复制）+ 分组列表 ---- */
+.sheet.sess-sheet { max-height:90%; }
+.ms-head { flex:none; display:flex; align-items:center; padding:0 10px 6px 18px; }
+.ms-head-title { font-size:15px; font-weight:700; color:var(--text); }
+.ms-head-x { margin-left:auto; width:32px; height:32px; border-radius:50%; border:none; background:none; color:var(--text-3); font-size:14px; font-family:var(--font); display:flex; align-items:center; justify-content:center; }
+.ms-head-x:active { background:var(--bg-card-2); }
+.ms-info { margin:0 12px 2px; background:var(--bg-card); border:.5px solid var(--line); border-radius:16px; overflow:hidden; }
+.ms-info-title { padding:12px 14px 11px; font-size:16px; border-bottom:.5px solid var(--line); font-weight:600; line-height:1.4; word-break:break-word; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.ms-info-row { position:relative; display:flex; align-items:flex-start; gap:10px; padding:9px 10px 10px 14px; min-height:52px; cursor:pointer; }
+.ms-info-row + .ms-info-row::before { content:''; position:absolute; top:0; left:14px; right:10px; height:.5px; background:var(--line); }
+.ms-info-row:active { background:var(--bg-card-2); }
+.ms-info-txt { flex:1; min-width:0; padding-top:2px; }
+.ms-info-label { font-size:10.5px; font-weight:600; letter-spacing:.45px; color:var(--text-3); text-transform:uppercase; }
+.ms-info-val { margin-top:3px; font-family:var(--mono); font-size:11px; line-height:1.5; color:var(--text-2); overflow-wrap:break-word; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.ms-info-val.empty { font-family:var(--font); font-size:12.5px; color:var(--text-3); }
+.ms-info-copy { flex:none; width:32px; height:32px; margin-top:1px; border-radius:9px; background:var(--bg-card-2); color:var(--text-2); display:flex; align-items:center; justify-content:center; }
+.ms-info-row.copied .ms-info-copy { color:var(--green); background:rgba(52,199,89,.14); }
+.ms-group-label { padding:16px 18px 6px; font-size:12px; font-weight:600; color:var(--text-3); }
+.ms-group { margin:0 12px; background:var(--bg-card); border:.5px solid var(--line); border-radius:16px; overflow:hidden; }
+.ms-row { position:relative; display:flex; align-items:center; gap:11px; padding:10px 14px; min-height:48px; cursor:pointer; }
+.ms-row + .ms-row::before { content:''; position:absolute; top:0; left:54px; right:14px; height:.5px; background:var(--line); }
+.ms-row:active { background:var(--bg-card-2); }
+.ms-row-ic { flex:none; width:29px; height:29px; border-radius:8px; background:var(--bg-card-2); color:var(--text-2); display:flex; align-items:center; justify-content:center; }
+.ms-row-mid { flex:1; min-width:0; }
+.ms-row-name { font-size:15px; font-weight:500; line-height:1.3; }
+.ms-row-desc { margin-top:2px; font-size:11.5px; line-height:1.4; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ms-row-val { flex:none; max-width:44%; font-size:12.5px; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ms-row-chev { flex:none; width:14px; height:14px; display:flex; align-items:center; justify-content:center; color:var(--text-3); }
+.ms-row.danger .ms-row-ic { color:var(--red); background:rgba(255,69,58,.12); }
+.ms-row.danger .ms-row-name { color:var(--red); }
+.ms-foot { padding:18px 16px 16px; text-align:center; font-size:11px; letter-spacing:.3px; color:var(--text-3); }
 /* 问过的问题面板 */
 .qrow { display:flex; align-items:flex-start; gap:10px; margin:0 10px 7px; padding:11px 13px; background:var(--bg-card); border:1px solid var(--line); border-radius:13px; cursor:pointer; text-align:left; font-family:var(--font); width:calc(100% - 20px); }
 .qrow:active { background:var(--bg-card-2); }

@@ -107,6 +107,9 @@ const ICONS = {
   sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
   moon: SVG_OPEN + '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   copy: SVG_OPEN + '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  check: SVG_OPEN + '<path d="m4.5 12.5 5 5 10-11"/></svg>',
+  chev: SVG_OPEN + '<path d="m9 6 6 6-6 6"/></svg>',
+  chart: SVG_OPEN + '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   speaker: SVG_OPEN + '<path d="M3 9.5v5h3.5L12 19V5L6.5 9.5z"/><path d="M15.5 8.8a4.6 4.6 0 0 1 0 6.4M18 6.3a8 8 0 0 1 0 11.4"/>',
   brain: SVG_OPEN + '<path d="M9.5 3a2.5 2.5 0 0 0-2.5 2.5c0 .4.1.7.2 1A3.5 3.5 0 0 0 5 13.5a3.5 3.5 0 0 0 2.2 6.2A2.5 2.5 0 0 0 11 21V5.5A2.5 2.5 0 0 0 9.5 3z"/><path d="M14.5 3a2.5 2.5 0 0 1 2.5 2.5c0 .4-.1.7-.2 1a3.5 3.5 0 0 1 2.2 7A3.5 3.5 0 0 1 16.8 19.7 2.5 2.5 0 0 1 13 21V5.5A2.5 2.5 0 0 1 14.5 3z"/></svg>',
   /* 思考图标（用户选定「打字泡」）：气泡里三颗点，live 时 CSS 驱动波浪 */
@@ -5023,6 +5026,8 @@ function openSheet(s) {
   sheetSession = s.id
   closeSubPanel()
   renderSheet(s)
+  const sc = $('#sheet-content')
+  if (sc) sc.scrollTop = 0   // 每次打开从顶部开始；投影刷新不抢用户滚动位置
   ovSet('sheet-overlay', true)
   if (!s.models) loadModels(s)
   if (!permOptionsOf(s)) loadPermCatalog()
@@ -5140,110 +5145,174 @@ function loadBaseSoon() {
   baseSoonTimer = setTimeout(() => { baseSoonTimer = null; loadBase() }, 500)
 }
 
-/* ⋯ 菜单（方案 A）：一屏设置行，行右侧常驻当前值；点行进入二级推送面板 */
+/* ⋯ 菜单：顶部会话身份卡（Session ID / 路径点按即可复制）+ 分组设置。
+   旧版每行一张卡、没有分组，直接拿会话名当菜单标题，整屏像一张调试清单；
+   现在改为 iOS 式分组卡 + 行图标，身份信息与操作入口分层。 */
 function renderSheet(s) {
   const c = $('#sheet-content')
   if (!c) return
   c.textContent = ''
-  c.appendChild(el('div', 'sheet-title', sessTitle(s)))
-  // 通用设置行：名称 + 描述 + 当前值 + ›
-  const valueRow = (name, desc, value, onClick) => {
-    const r = btnize(el('div', 'sheet-row'))
-    const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
-    mid.appendChild(el('div', 'r-name', name))
-    if (desc) mid.appendChild(el('div', 'r-desc', desc))
-    r.appendChild(mid)
-    r.appendChild(el('span', 'r-val', value || ''))
-    r.appendChild(el('span', 'r-chev', '›'))
-    r.onclick = onClick
+  const activate = (node, fn) => {
+    node.onclick = fn
+    node.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn() } }
+    return node
+  }
+
+  // ---- 会话身份卡：标题 + 两个可复制的技术字符串 ----
+  const info = el('div', 'ms-info')
+  info.appendChild(el('div', 'ms-info-title', sessTitle(s)))
+  const infoRow = (label, value, emptyText) => {
+    const txt = el('div', 'ms-info-txt')
+    txt.appendChild(el('div', 'ms-info-label', label))
+    txt.appendChild(el('div', 'ms-info-val' + (value ? '' : ' empty'), value || emptyText))
+    const copyBtn = el('span', 'ms-info-copy')
+    copyBtn.appendChild(icon('copy', 16))
+    const row = activate(btnize(el('div', 'ms-info-row')), () => {
+      if (!value) { toast(emptyText, true); return }
+      copyText(value, (ok) => {
+        if (!ok) { toast('复制失败，请重试', true); return }
+        vibrate(8)
+        row.classList.add('copied')
+        copyBtn.textContent = ''
+        copyBtn.appendChild(icon('check', 16))
+        clearTimeout(row._copyTimer)
+        row._copyTimer = setTimeout(() => {
+          row.classList.remove('copied')
+          copyBtn.textContent = ''
+          copyBtn.appendChild(icon('copy', 16))
+        }, 1400)
+        toast(label === '路径' ? '已复制路径' : '已复制 ' + label)
+      })
+    })
+    row.setAttribute('aria-label', '复制' + label)
+    row.append(txt, copyBtn)
+    return row
+  }
+  info.appendChild(infoRow('Session ID', s.id, '暂不可用'))
+  info.appendChild(infoRow('路径', s.cwd, '尚未加载'))
+  c.appendChild(info)
+
+  // ---- 分组卡：行间细分隔线，不再每行一张卡 ----
+  const group = (label) => {
+    c.appendChild(el('div', 'ms-group-label', label))
+    const box = el('div', 'ms-group')
+    c.appendChild(box)
+    return box
+  }
+  const menuRow = (box, opts) => {
+    const r = activate(btnize(el('div', 'ms-row' + (opts.danger ? ' danger' : ''))), opts.onClick)
+    const ic = el('span', 'ms-row-ic')
+    ic.appendChild(icon(opts.icon, 17))
+    const mid = el('div', 'ms-row-mid')
+    mid.appendChild(el('div', 'ms-row-name', opts.name))
+    if (opts.desc) mid.appendChild(el('div', 'ms-row-desc', opts.desc))
+    r.append(ic, mid)
+    if (opts.value) r.appendChild(el('span', 'ms-row-val', opts.value))
+    if (!opts.noChev) {
+      const ch = el('span', 'ms-row-chev')
+      ch.appendChild(icon('chev', 14))
+      r.appendChild(ch)
+    }
+    box.appendChild(r)
     return r
   }
-  // ---- 任务清单（有任务才出现；点开任务抽屉）----
-  if (s.todos && s.todos.length) {
-    const st = todoStats(s)
-    c.appendChild(valueRow('任务清单', st.done + '/' + st.total + ' 已完成', st.allDone ? '✓ 全部完成' : '进行中', () => { closeSheet(); openTaskSheet(s) }))
-  }
-  // ---- 工作区文件（浏览 agent 的工作目录；交付物/产出都能看）----
-  c.appendChild(valueRow('工作区文件', '浏览这个会话的目录 · 预览 / 分享', '', () => { closeSheet(); openWsSheet(s) }))
-  // ---- 模型 ----
-  c.appendChild(valueRow('模型', '切换模型 / 思考强度', modelLabel(s), () => openModelPanel(s)))
-  // ---- 权限 ----
+
+  // ---- 对话：模型 / 权限 / 运行中发送 / 自动朗读 ----
+  const talk = group('对话')
+  menuRow(talk, { icon: 'brain', name: '模型', value: modelLabel(s), onClick: () => openModelPanel(s) })
   const perms = s.permissions
   const permName = () => {
     if (!perms) return '加载中…'
     return permLabel(perms.currentValue)
   }
-  c.appendChild(valueRow('权限', '文件与命令的边界', permName(), () => openPermPanel(s)))
-  // ---- 运行中发送 ----
-  c.appendChild(valueRow('运行中发送', '排队或插话', busyEnter() === 'queue' ? '排队' : '插话', () => openSendPanel(s)))
-  // 自动朗读开关：直接切换（不需要二级面板）
+  menuRow(talk, { icon: 'lock', name: '权限', value: permName(), onClick: () => openPermPanel(s) })
+  menuRow(talk, { icon: 'bolt', name: '运行中发送', value: busyEnter() === 'queue' ? '排队' : '插话', onClick: () => openSendPanel(s) })
   {
-    const row = btnize(el('div', 'sheet-row'))
-    const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
-    mid.appendChild(el('div', 'r-name', '自动朗读回答'))
-    mid.appendChild(el('div', 'r-desc', '每轮回答完成后自动语音播报（代码块跳过）'))
-    row.appendChild(mid)
     const sw = el('span', 'tg-sw' + (ttsAuto() ? ' on' : ''))
     sw.setAttribute('role', 'switch')
     sw.setAttribute('aria-checked', ttsAuto() ? 'true' : 'false')
-    row.appendChild(sw)
-    row.onclick = () => {
+    const r = activate(btnize(el('div', 'ms-row')), () => {
       vibrate(8)
       const nv = !ttsAuto()
       ttsSetAuto(nv)
       sw.classList.toggle('on', nv)
       sw.setAttribute('aria-checked', nv ? 'true' : 'false')
       if (nv) { ttsWarm(); toast('已开启：回答完成后自动朗读') } else { ttsStop(); toast('已关闭自动朗读') }
-    }
-    c.appendChild(row)
+    })
+    const ic = el('span', 'ms-row-ic')
+    ic.appendChild(icon('speaker', 17))
+    const mid = el('div', 'ms-row-mid')
+    mid.appendChild(el('div', 'ms-row-name', '自动朗读回答'))
+    mid.appendChild(el('div', 'ms-row-desc', '每轮回答结束后自动语音播报（代码块跳过）'))
+    r.append(ic, mid, sw)
+    talk.appendChild(r)
   }
-  // ---- 统计（摘要值，点开看全量）----
+
+  // ---- 内容：任务清单（有才出现）/ 工作区文件 / 统计 / 复制全部对话 ----
+  const data = group('内容')
+  if (s.todos && s.todos.length) {
+    const st = todoStats(s)
+    menuRow(data, { icon: 'todo', name: '任务清单', value: st.allDone ? '全部完成' : st.done + '/' + st.total + ' 已完成', onClick: () => { closeSheet(); openTaskSheet(s) } })
+  }
+  menuRow(data, { icon: 'folder', name: '工作区文件', desc: '浏览目录 · 预览 / 分享', onClick: () => { closeSheet(); openWsSheet(s) } })
   const p = s.ctxPressure
   const statVal = p && p.contextWindow ? Math.round(p.pressureTokens / p.contextWindow * 100) + '% · ' + fmtCtxTok(p.pressureTokens) : '—'
-  c.appendChild(valueRow('统计', '上下文 / tokens / 耗时', statVal, () => openStatsPanel(s)))
-  // ---- 复制全部对话（直接动作）----
-  const copyRow = btnize(el('div', 'sheet-row'))
-  const cm = el('div'); cm.style.minWidth = '0'; cm.style.flex = '1'
-  cm.appendChild(el('div', 'r-name', '复制全部对话'))
-  cm.appendChild(el('div', 'r-desc', '导出为纯文本，粘贴到任何地方'))
-  copyRow.appendChild(cm)
-  copyRow.onclick = () => {
-    copyText(sessionText(s), (ok) => {
-      vibrate(10)
-      if (ok) toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
-      else toast('复制失败，请重试', true)
-    })
-  }
-  c.appendChild(copyRow)
-  // ---- 会话：重命名 / 分叉 / 归档（原只在侧栏会话菜单里有，正文里也要能直接做）----
-  c.appendChild(el('div', 'sheet-group', '会话'))
+  menuRow(data, { icon: 'chart', name: '统计', value: statVal, onClick: () => openStatsPanel(s) })
+  menuRow(data, {
+    icon: 'copy',
+    name: '复制全部对话',
+    desc: '导出为纯文本，粘贴到任何地方',
+    noChev: true,   // 就地动作（不进入下一级），与导航行区分
+    onClick: () => {
+      copyText(sessionText(s), (ok) => {
+        vibrate(10)
+        if (ok) toast('已复制 ' + s.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').length + ' 条消息')
+        else toast('复制失败，请重试', true)
+      })
+    },
+  })
+
+  // ---- 管理：重命名 / 分叉 / 归档 ----
+  const manage = group('管理')
   const t = s.title || ''
-  c.appendChild(valueRow('重命名', '改当前会话的标题', t.length > 14 ? t.slice(0, 14) + '…' : (t || '未命名'), () => openRenamePanel(s)))
-  c.appendChild(valueRow('分叉', '从最近完成的轮复制出新会话', '', async () => {
-    vibrate(8)
-    try {
-      closeSheet()
-      toast('正在分叉…')
-      const v = await rpc('session/fork', { request: { sessionId: s.id } })
-      toast('已分叉 ✓ 正在打开')
-      location.hash = '#/s/' + v.sessionId
-      flushForkTail(v.sessionId)
-    } catch (e) { toast('分叉失败：' + e.message, true) }
-  }))
-  c.appendChild(valueRow('归档', '从列表移除，可在桌面端恢复', '', async () => {
-    vibrate(8)
-    try {
-      const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } })
-      if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
-      S.sessions.delete(s.id)
-      closeSheet()
-      location.hash = '#/'   // 当前会话没了：回主页
-      renderList()
-      toast('已归档（可在桌面端恢复）')
-    } catch (e) { toast('归档失败：' + e.message, true) }
-  }))
-  c.appendChild(el('div', 'sheet-note', '点带 › 的行进入对应设置。'))
-  c.appendChild(el('div', 'sheet-note', 'DSH PWA v1.13.0'))
+  menuRow(manage, { icon: 'pencil', name: '重命名', value: t.length > 14 ? t.slice(0, 14) + '…' : (t || '未命名'), onClick: () => openRenamePanel(s) })
+  menuRow(manage, {
+    icon: 'fork',
+    name: '分叉',
+    desc: '从最近完成的轮复制出新会话',
+    noChev: true,
+    onClick: async () => {
+      vibrate(8)
+      try {
+        closeSheet()
+        toast('正在分叉…')
+        const v = await rpc('session/fork', { request: { sessionId: s.id } })
+        toast('已分叉 ✓ 正在打开')
+        location.hash = '#/s/' + v.sessionId
+        flushForkTail(v.sessionId)
+      } catch (e) { toast('分叉失败：' + e.message, true) }
+    },
+  })
+  menuRow(manage, {
+    icon: 'archive',
+    name: '归档',
+    desc: '从列表收起，可在桌面端恢复',
+    danger: true,
+    noChev: true,
+    onClick: async () => {
+      vibrate(8)
+      try {
+        const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } })
+        if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
+        S.sessions.delete(s.id)
+        closeSheet()
+        location.hash = '#/'   // 当前会话没了：回主页
+        renderList()
+        toast('已归档（可在桌面端恢复）')
+      } catch (e) { toast('归档失败：' + e.message, true) }
+    },
+  })
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.17.0'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -6164,8 +6233,12 @@ function buildShell() {
     </div>
   </div>
   <div class="sheet-overlay" id="sheet-overlay">
-    <div class="sheet" role="dialog" aria-label="会话设置">
+    <div class="sheet sess-sheet" role="dialog" aria-label="会话设置">
       <div class="grabber"></div>
+      <div class="ms-head">
+        <span class="ms-head-title">会话设置</span>
+        <button class="ms-head-x" id="sheet-close" type="button" aria-label="关闭">✕</button>
+      </div>
       <div class="sheet-scroll" id="sheet-content"></div>
       <div class="sheet-sub" id="sheet-sub" aria-hidden="true">
         <div class="sub-head">
@@ -6280,6 +6353,7 @@ function buildShell() {
   $('#qd-close').onclick = () => closeQDrawer()
   $('#q-scrim').addEventListener('click', () => closeQDrawer())
   $('#sheet-overlay').addEventListener('click', (e) => { if (e.target.id === 'sheet-overlay') closeSheet() })
+  $('#sheet-close').onclick = () => closeSheet()
   $('#new-cancel').onclick = () => { location.hash = '#/' }
   $('#fab-new').onclick = () => { vibrate(8); S.todoMode = false; location.hash = '#/new'; updateTabs() }
   $('#todo-chip').onclick = () => { vibrate(8); S.todoMode = !S.todoMode; renderList(); refreshBadges(); updateTabs() }
