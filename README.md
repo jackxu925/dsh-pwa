@@ -4,7 +4,7 @@
 
 English | [中文](README.zh.md)
 
-**DeepSeek Harness in your pocket.** A phone-first PWA for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`): it mounts at `/m` on your `dsh web` server — session list, real-time streaming chat, approvals, agent questions, new sessions, image messages. No app install: open it in mobile Safari/Chrome → *Add to Home Screen* → full-screen app. iOS and Android.
+**DeepSeek Harness in your pocket.** A phone-first PWA for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`): it mounts at `/m` on your `dsh web` server — streaming chat, approvals and questions, plus a reminder center, deliverable files with share/AirDrop, full-text session search, and message feedback. No app install: open it in mobile Safari/Chrome → *Add to Home Screen* → full-screen app. iOS and Android.
 
 [![npm version](https://img.shields.io/npm/v/dsh-pwa)](https://www.npmjs.com/package/dsh-pwa)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -29,15 +29,22 @@ If you want Android system notifications and certificate-pinned device pairing, 
 
 ## Features
 
-- 📋 Session list with workspace grouping, search, pull-to-refresh, and a real "needs attention" filter (pending approvals / questions)
-- 💬 Streaming chat with optimistic send, queued-message visibility, per-day dividers, timestamps, code-copy buttons, and full-screen image viewer
+- 📋 **Session list** with workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and rename / fork / archive
+- 🔎 **Global search**: local title/path filtering plus full-text message search (`session/search`) with highlighted snippets that jump straight to the session
+- 💬 **Streaming chat**: optimistic send, per-day dividers, timestamps, code-copy buttons, full-screen image viewer; dual send modes — queue while running, long-press to steer — and queued messages can be edited / steered / removed
 - ✅ Approvals & ❓ agent questions as tappable cards (dangerous commands get a red double-confirm)
+- 📦 **Deliverables & workspace files**: files the agent `present`s become timeline cards (inline image preview, direct text read) with share/AirDrop and open-on-Mac actions; the ⋯ menu browses the whole session workspace with per-turn change hints
+- ⏰ **Reminder center**: a third home tab lists every reminder your agents created — humanized schedules, next-fire countdowns, delivery history; delete in place or jump back to the origin session to reschedule
+- 👍👎 **Message feedback**: thumbs up/down on any assistant message (tap again to retract), synced live with the desktop feedback store
+- 🧠 **Context transparency**: per-turn stats (duration / TTFT / decode speed / tokens), a reasoning drawer, TTS read-aloud, and **compaction markers** — when older context is condensed into a summary, the timeline says so and shows the summary
+- 🎯 **Goal management**: banner + action panel (pause / resume / edit / delete) with timeline markers
 - 🖼️ Send images from camera / photo library / clipboard paste (auto-compressed to the model's limits)
+- 🔐 **In-app re-login**: when auth expires, paste the `dsh web` startup link (or bare token) to mint a fresh login inside the app — no reinstall needed despite iOS home-screen apps having an isolated cookie jar from Safari
 - ➕ New sessions with agent-preset picker
 - 📳 Haptics, dark/light themes, draft autosave per session, connection-status pill with manual reconnect
 - ⚙️ Desktop GUI gets a *Settings → 手机端* entry showing the phone URL + copy button (no typing URLs on a phone keyboard)
 
-The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 69 items, all fixed, each with the root cause.
+The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 140 items, all fixed, each with the root cause.
 
 ## Quick start
 
@@ -78,6 +85,8 @@ dsh --profile web --host 0.0.0.0 --port 3080 --trusted-host <your-access-domain>
 
 Upgrade later with `npm update dsh-pwa` and a `dsh web` restart. The plugin only mounts static files; the page speaks DSH's own `/api`, so it moves with your DSH version (developer-preview caveat in the FAQ below).
 
+> **Enabling global search**: the shipped web bundle keeps the full-text index off; set `session-query-sqlite` → `openAt: first-search` in your profile patch. Note: the 0.2.1-rc.x indexer requires a write-free persistence window while building, which conflicts with resident bots (ds-bot heartbeats every 20–40 s) — pick one until upstream relaxes the quiescence check.
+
 ## How it works
 
 - The server does exactly one thing: mount `web/` as static files at `/m` (`lib/routes.js`, self-healing if the webServer instance is recreated).
@@ -96,11 +105,11 @@ Iterating on the UI needs no restart: files are re-read per request, just refres
 
 Contributor-friendly next steps (from [docs/AUDIT.md](docs/AUDIT.md) §"still needs protocol/server support"):
 
+- [x] Cancel / edit queued messages (`session/updateQueue`)
+- [x] Mobile session management: rename / fork / archive
 - [ ] Last-message preview + unread counts in `session/list`
-- [ ] Session management (archive / rename / delete) on mobile via long-press menu
-- [ ] Cancel / edit queued messages
-- [ ] Web Push: system notifications for approvals & questions while in background
-- [ ] Service-worker offline shell (needs https first)
+- [ ] Web Push: system notifications for approvals & questions while in background (the https prerequisite is now met via `tailscale serve`)
+- [ ] Service-worker offline shell
 
 Full list: [docs/ROADMAP.md](docs/ROADMAP.md). Grab one, open a PR — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -117,6 +126,8 @@ Vanilla JS, no build step, no framework. `web/` is the app, `lib/` is the mount,
 **Is it safe to expose?** Same threat model as `dsh web` itself: anyone who can reach the URL (your tailnet / LAN) can drive your agent. Keep it inside a trusted network; don't put it on the public internet.
 
 **Does it work offline?** No — it needs a live connection to your `dsh` server.
+
+**What happens when auth expires?** The page shows a "re-login" dialog: paste the startup link `dsh web` printed on your Mac (or the bare token) and the app mints a fresh login in place — no reinstall required.
 
 **Will a DSH update break it?** The page speaks the same `/api` as the desktop GUI and ships no protocol logic of its own, so it moves with your DSH version. That said, DSH is still in developer preview and its API may change in breaking ways — if that happens, the plugin will need a matching update.
 
