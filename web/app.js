@@ -1537,7 +1537,7 @@ function renderList() {
   // 同步分段控件的选中态
   document.querySelectorAll('.seg-btn').forEach((b) => { const on = b.dataset.mode === S.listMode; b.classList.toggle('sel', on); b.setAttribute('aria-pressed', on ? 'true' : 'false') })
   // 提醒中心：第三档就地渲染（同屏切换，无中间页）；搜索时仍回落到会话结果
-  if (S.listMode === 'rem' && !q) { setListTitle('提醒'); renderRemList(wrap); return }
+  if (S.listMode === 'rem' && !q) { setListTitle('自动化'); renderRemList(wrap); return }
   setListTitle(null)  // 大标题默认「会话」；下钻工作区时再覆盖为工作区名
   if (S.todoMode) {
     visible = visible.filter(hasPending)
@@ -5907,7 +5907,7 @@ function buildShell() {
       <div class="list-seg" id="list-seg" aria-label="列表排序方式">
         <button class="seg-btn" data-mode="time" type="button" aria-pressed="true">最近活跃</button>
         <button class="seg-btn" data-mode="workspace" type="button" aria-pressed="false">按工作区</button>
-        <button class="seg-btn" data-mode="rem" type="button" aria-pressed="false">提醒</button>
+        <button class="seg-btn" data-mode="rem" type="button" aria-pressed="false">自动化</button>
       </div>
       <div id="session-list"></div>
     </div>
