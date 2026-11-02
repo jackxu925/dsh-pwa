@@ -128,6 +128,9 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
   padding: 0 14px; color:var(--text); font-size:16px;  /* ≥16px：防 iOS 聚焦自动缩放 */
 }
 .ws-group { padding: 18px 16px 8px; font-size:13px; color:var(--text-3); font-weight:600; letter-spacing:.3px; display:flex; align-items:center; gap:7px; max-width: 780px; margin: 0 auto; width: 100%; }
+/* 时间视图的日期分组头：比工作区分组更轻，避免每个日期都变成一条横带 */
+.list-day { padding: 16px 16px 6px; font-size:12px; color:var(--text-3); font-weight:600; letter-spacing:.3px; max-width:780px; margin:0 auto; width:100%; }
+.list-day:first-child { padding-top: 6px; }
 
 /* 列表视图切换：最近活跃平铺 / 按工作区分组 */
 /* 三种列表（会话卡/工作区行/提醒卡）统一在 780px 内容列内，卡片左右各 12px → 756px；
@@ -299,6 +302,7 @@ html.light .ext-chip.c-md { color:#2563eb; }
   font-size:14px; color:var(--text-2); line-height:1.4;
   overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
 }
+.session-card .s-preview-empty { color:var(--text-3); font-size:13px; }
 .session-card .row3 { display:flex; align-items:center; gap:8px; }
 .s-meta { margin-left:auto; font-size:12px; color:var(--text-3); flex:none; }
 
@@ -464,6 +468,32 @@ html.light .tbl-wrap { border-color:rgba(15,23,42,.12); }
 html.light .tool-trunc { color:#9a4a06; }
 .tool-body pre { font-family:var(--mono); font-size:12px; line-height:1.55; color:var(--text-2); white-space:pre-wrap; word-break:break-word; }
 
+/* 连续工具调用组：折叠后只占一行，展开后逐张工具卡 */
+.tool-run {
+  align-self:stretch; max-width:min(97%, 780px);
+  background:var(--bg-card); border:.5px solid var(--line); border-radius:14px;
+  overflow:hidden; animation:msgin .2s var(--ease-out);
+}
+.tool-run-head {
+  display:flex; align-items:center; gap:9px; width:100%; min-height:44px;
+  padding:10px 13px; border:none; background:none; color:var(--text);
+  font:inherit; text-align:left; cursor:pointer;
+}
+.tool-run-head:active { background:var(--bg-card-2); }
+.tool-run-ico { width:28px; height:28px; border-radius:8px; flex:none; display:flex; align-items:center; justify-content:center; background:var(--accent-soft); color:var(--info); }
+.tool-run-mid { flex:1; min-width:0; }
+.tool-run-title { font-size:13.5px; font-weight:600; }
+.tool-run-sum { margin-top:1px; font-size:11.5px; color:var(--text-3); font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tool-run-state { font-size:11.5px; flex:none; }
+.tool-run-state.ok { color:var(--green); }
+.tool-run-state.run { color:var(--info); }
+.tool-run-state.err { color:var(--red); }
+.tool-run-chev { color:var(--text-3); font-size:11px; transition:transform .2s var(--ease-out); flex:none; }
+.tool-run.open .tool-run-chev { transform:rotate(90deg); }
+.tool-run-body { display:none; padding:0 8px 8px; }
+.tool-run.open .tool-run-body { display:flex; flex-direction:column; gap:8px; }
+.tool-run-body .tool-card { max-width:100%; }
+
 /* 流式光标 */
 .caret { display:inline-block; width:9px; height:16px; background:var(--accent); border-radius:2px; vertical-align:-2px; animation:blink .8s step-end infinite; }
 @keyframes blink { 50% { opacity:0; } }
@@ -585,6 +615,12 @@ html.light .tool-trunc { color:#9a4a06; }
 .pick-ws .ws-path { font-size:12px; color:var(--text-3); font-family:var(--mono); margin-top:1px; word-break:break-all; }
 .pick-ws .check { margin-left:auto; color:var(--accent); font-size:18px; visibility:hidden; flex:none; }
 .pick-ws.sel .check { visibility:visible; }
+/* 新会话首屏：工作区只留一行当前选择，点开底部面板再选；路径单行省略 */
+.new-ws-current { margin-bottom: 2px; }
+.new-ws-current .ws-path { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; word-break:normal; }
+.new-ws-current .ws-change { margin-left:auto; color:var(--accent); font-size:12.5px; font-weight:600; flex:none; }
+.new-ws-current .r-chev { margin-left:2px; }
+.ws-pick-sep { padding: 12px 16px 6px; font-size:12px; color:var(--text-3); font-weight:600; max-width:756px; margin:0 auto; width:100%; }
 .preset-row { display:flex; gap:8px; padding:2px 16px 6px; flex-wrap:wrap; max-width:780px; margin:0 auto; width:100%; }
 .start-btn { margin:16px; padding:15px 0; border:none; border-radius:15px; background:var(--accent-fill); color:#fff; font-size:16px; font-weight:700; width:calc(100% - 32px); max-width:748px; }
 .start-btn:disabled { opacity:.4; }
@@ -691,11 +727,11 @@ html.light .tool-trunc { color:#9a4a06; }
 
 /* 动效降级 */
 @media (prefers-reduced-motion: reduce) {
-  .msg, .tool-card, .approval-card, .ask-card, .queue-chip, #view-list, #view-new { animation: none; }
+  .msg, .tool-card, .tool-run, .approval-card, .ask-card, .queue-chip, #view-list, #view-new { animation: none; }
   #view-chat { transition-duration: .01s; }
   .caret, .badge .b-dot, .queue-chip .q-dot { animation: none; }
   .sk-bubble { animation: none; }
-  .sheet, .sheet-overlay, .toast, .ptr, .tool-chev, .new-msg-pill, .img-viewer { transition: none; }
+  .sheet, .sheet-overlay, .toast, .ptr, .tool-chev, .tool-run-chev, .new-msg-pill, .img-viewer { transition: none; }
   .spinner { animation-duration: 1.6s; }
 }
 
