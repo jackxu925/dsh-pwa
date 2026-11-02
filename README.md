@@ -45,7 +45,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 📳 Haptics, dark/light themes, draft autosave per session, connection-status pill with manual reconnect
 - ⚙️ Desktop GUI gets a *Settings → 手机端* entry showing the phone URL + copy button (no typing URLs on a phone keyboard)
 
-The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 147 items, all fixed, each with the root cause.
+The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 148 items, all fixed, each with the root cause.
 
 ## Quick start
 
