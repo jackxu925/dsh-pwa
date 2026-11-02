@@ -300,7 +300,7 @@ function sess(id) {
       createdHere: false,              // 本机创建的会话：即使为空也在列表可见，避免「刚建的会话消失了」
       subagent: false,                 // 子代理会话不在列表显示
       items: [],                       // folded chat items（含乐观上屏的 pending 项）
-      queue: [],                       // control 流 queue 帧（排队/插话中的消息）
+      queue: [],                       // 待发送消息：inbox 投影（next-turn/next-step），兼容旧宿主 queue 帧
       live: null,                      // {turn, step, texts:{idx:text}}
       approvals: new Map(),            // eventId → {eventId, toolName, callId, reason, outcome}
       questions: new Map(),            // eventId → {rpcId, questions, outcome}
@@ -2610,6 +2610,28 @@ function deriveWorkspaces() {
     return { workspaceId: path, path, title: parts[parts.length - 1] || path, sessionIds: ids }
   })
 }
+/* 排队/插话消息的落地（宿主 0.2.x）：agent-loop 的 inbox 投影。
+   next-turn＝排队等下一轮（操作单里可「立即插话」），next-step＝已插话、等当前步领取。
+   早期宿主走的 control 流 queues baseline / queue 帧在新版已不再下发（旧帧解析仍保留在
+   Mux.handlers.control 里兼容旧宿）——只认旧帧就会「发完排队消息在界面里凭空消失」。
+   s.queue 统一成 [{ id, placement, message }]，id 即宿主 updateQueue 的 itemId。 */
+function applyInboxQueue(s, inbox) {
+  if (!inbox || typeof inbox !== 'object') return
+  const items = []
+  const take = (list, placement) => {
+    if (!Array.isArray(list)) return
+    for (const message of list) {
+      if (!message || typeof message.id !== 'string' || !message.id) continue
+      const kind = message.source && message.source.kind
+      if (kind && kind !== 'user') continue   // 注入的上下文（如 tool 回填的图片）不是用户排队消息
+      items.push({ id: message.id, placement, message })
+    }
+  }
+  take(inbox['next-turn'], 'queued')
+  take(inbox['next-step'], 'steering')
+  s.queue = items
+  if (S.current === s.id) renderQueueStrip(s)
+}
 function applyListValues(s, values) {
   if (!values || typeof values !== 'object') return
   if (typeof values.title === 'string' && values.title) {
@@ -2632,6 +2654,7 @@ function applyListValues(s, values) {
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if (values.modelSelection && values.modelSelection.next) s.modelSel = values.modelSelection.next
   if ('todos' in values) setTodos(s, values.todos)
+  if ('inbox' in values) applyInboxQueue(s, values.inbox)
   applyStats(s, values)
 }
 
@@ -3247,6 +3270,7 @@ function applyProjection(s, values) {
   }
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if ('todos' in values) setTodos(s, values.todos)
+  if ('inbox' in values) applyInboxQueue(s, values.inbox)
   applyStats(s, values)
 }
 /* ---- workspace 流：归档集合 + 真实工作区分组（修「归档后列表不消失」） ---- */
