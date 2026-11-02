@@ -339,6 +339,54 @@ const hasPending = (s) => {
 }
 function sessTitle(s) { return s.title || '新会话' }
 
+/* 列表预览：把 markdown / 代码块压成一行可扫读的纯文本。
+   turnOutline 的 response/prompt 已经是 120/50 字上限的预览，这里只做去标记与兜底截断。 */
+function previewText(raw) {
+  let t = String(raw || '')
+  if (!t) return ''
+  t = t.replace(/```[\s\S]*?```/g, ' ')
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+  t = t.replace(/^#{1,6}\s+/gm, '')
+  t = t.replace(/^>\s?/gm, '')
+  t = t.replace(/\s*\|\s*/g, ' ')
+  t = t.replace(/-{3,}/g, ' ')
+  t = t.replace(/[*_~`]/g, '')
+  t = t.replace(/\s+/g, ' ').trim()
+  if (!t) return ''
+  return t.length > 96 ? t.slice(0, 96).replace(/\s+$/, '') + '…' : t
+}
+/* 工作区短名：优先宿主标题，其次路径末段；绝不把整条绝对路径塞进列表 */
+function wsLabelOf(s) {
+  const ws = findWs(s)
+  const path = (ws && ws.path) || s.cwd || ''
+  if (TEMP_WS_RE.test(path)) return 'Agent 临时'
+  if (ws) return ws.title || String(ws.path || '').split('/').filter(Boolean).pop() || ''
+  return String(s.cwd || '').split('/').filter(Boolean).pop() || ''
+}
+/* 时间视图的日期分组：今天 / 昨天 / 近 7 天 / 更早（按本机时区） */
+function listDayKey(ts) {
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  if (!ts || ts >= start) return 'today'
+  if (ts >= start - 86400000) return 'yesterday'
+  if (ts >= start - 6 * 86400000) return 'week'
+  return 'older'
+}
+const LIST_DAY_LABEL = { today: '今天', yesterday: '昨天', week: '近 7 天', older: '更早' }
+/* Agent 临时 worktree 不进新会话首屏，也不在会话列表里显示成一串技术目录名 */
+const TEMP_WS_RE = /\/\.dsh\/state\/superagent\/work(?:\/|$)/
+/* 冷启动列表没有事件流：宿主已把 turnOutline 的 prompt/response 放进 session/list 投影。
+   这是“最后一条消息摘要”的零请求来源；当前打开的会话让事件流继续实时覆盖，不在这里抢。 */
+function noteOutlinePreview(s) {
+  if (!s || S.current === s.id) return
+  const arr = Array.isArray(s.turnOutline) ? s.turnOutline : null
+  if (!arr || !arr.length) return
+  const last = arr[arr.length - 1]
+  const txt = previewText(last && (last.response || last.prompt))
+  if (txt) s.lastPreview = txt
+}
+
 /* ================= 图片 ================= */
 const attachCache = new Map()  // attachmentId → dataUrl
 function imageBlocksOf(content) {
@@ -610,8 +658,9 @@ function foldEvent(s, event, view) {
       if (item) {
         item.state = d.error ? 'err' : 'ok'
         item.result = text
+        item.endTime = event.time
       } else {
-        s.items.push({ kind: 'tool', callId: callId || null, name: 'tool', args: {}, state: d.error ? 'err' : 'ok', result: text, time: event.time })
+        s.items.push({ kind: 'tool', callId: callId || null, name: 'tool', args: {}, state: d.error ? 'err' : 'ok', result: text, time: event.time, endTime: event.time })
       }
       break
     }
@@ -800,6 +849,47 @@ function toolNode(item) {
   const toggle = () => { card.classList.toggle('open'); head.setAttribute('aria-expanded', card.classList.contains('open') ? 'true' : 'false') }
   head.onclick = toggle
   head.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() } }
+  card.append(head, body)
+  return card
+}
+/* 连续工具调用收成一组：运行中默认展开（还能看到它在干什么），轮结束后默认收起，
+   让最终回答回到视线；用户点过展开/收起的状态存在 s._runOpen 里，重渲染不丢。 */
+function toolRunNode(s, run) {
+  const key = 'run:' + (run[0].callId || run[0].time)
+  const running = run.some((t) => t.state === 'run')
+  const hasErr = run.some((t) => t.state === 'err')
+  const explicit = s._runOpen && s._runOpen.get(key)
+  const open = explicit != null ? explicit : running
+  const card = el('div', 'tool-run' + (open ? ' open' : ''))
+  const head = el('button', 'tool-run-head')
+  head.type = 'button'
+  head.setAttribute('aria-expanded', open ? 'true' : 'false')
+  const ico = el('span', 'tool-run-ico'); ico.appendChild(icon('wrench', 15))
+  const mid = el('div', 'tool-run-mid')
+  mid.appendChild(el('div', 'tool-run-title', '执行了 ' + run.length + ' 步'))
+  const counts = new Map()
+  for (const t of run) { const n = t.name || 'tool'; counts.set(n, (counts.get(n) || 0) + 1) }
+  let types = [...counts.entries()].slice(0, 3).map(([n, c]) => n + ' ×' + c).join(' · ')
+  if (counts.size > 3) types += ' 等'
+  const start = Math.min(...run.map((t) => t.time || Infinity))
+  const end = Math.max(...run.map((t) => t.endTime || t.time || 0))
+  const dur = start !== Infinity && end > start ? fmtDur(end - start) : ''
+  const sum = [types, dur].filter(Boolean).join(' · ')
+  if (sum) mid.appendChild(el('div', 'tool-run-sum', sum))
+  head.appendChild(ico)
+  head.appendChild(mid)
+  head.appendChild(el('span', 'tool-run-state ' + (running ? 'run' : hasErr ? 'err' : 'ok'), running ? '运行中' : hasErr ? '有错误' : '完成'))
+  head.appendChild(el('span', 'tool-run-chev', '▶'))
+  const body = el('div', 'tool-run-body')
+  for (const item of run) body.appendChild(toolNode(item))
+  head.onclick = () => {
+    const next = !card.classList.contains('open')
+    card.classList.toggle('open', next)
+    head.setAttribute('aria-expanded', next ? 'true' : 'false')
+    if (!s._runOpen) s._runOpen = new Map()
+    s._runOpen.set(key, next)
+    vibrate(6)
+  }
   card.append(head, body)
   return card
 }
@@ -1051,10 +1141,24 @@ function renderChat(s, forceScroll) {
   // 更早的消息滚动到顶自动加载（无感），不再给用户一个按钮
   if (s.hasMore) sc.appendChild(el('div', 'auto-load-hint', '· 上滑加载更早 ·'))
   let lastDay = ''
-  for (const item of s.items) {
+  for (let i = 0; i < s.items.length; i++) {
+    const item = s.items[i]
     if (item.time) {
       const day = new Date(item.time).toDateString()
       if (day !== lastDay) { lastDay = day; sc.appendChild(el('div', 'day-sep', dayLabel(item.time))) }
+    }
+    if (item.kind === 'tool') {
+      let j = i
+      while (j + 1 < s.items.length && s.items[j + 1].kind === 'tool') j++
+      const run = s.items.slice(i, j + 1)
+      if (run.length >= 2) {
+        const node = toolRunNode(s, run)
+        const k = itemKey(run[0])
+        if (k && node.dataset) node.dataset.k = k
+        sc.appendChild(node)
+        i = j
+        continue
+      }
     }
     sc.appendChild(itemNode(s, item))
   }
@@ -1582,9 +1686,18 @@ function renderList() {
     renderGlobSection(wrap, q, true)
     return
   }
-  // 按时间视图：全部会话平铺、按最近活跃降序，卡片标注所属工作区
+  // 按时间视图：按最近活跃降序，按「今天 / 昨天 / 近 7 天 / 更早」分组；
+  // 日期头不给数量，避免每个头都变成一屏噪声。
   if (S.listMode === 'time') {
-    for (const s of visible) wrap.appendChild(sessionCard(s, true))
+    let lastKey = ''
+    for (const s of visible) {
+      const key = listDayKey(s.updatedAt)
+      if (key !== lastKey) {
+        lastKey = key
+        wrap.appendChild(el('div', 'list-day', LIST_DAY_LABEL[key]))
+      }
+      wrap.appendChild(sessionCard(s, true))
+    }
     return
   }
   /* 按工作区视图：两级结构 ——
@@ -2251,27 +2364,38 @@ function sessionCard(s, showWs) {
   card.setAttribute('tabindex', '0')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
-  if (isUnread(s)) row1.appendChild(el('span', 's-unread', ''))
+  if (isUnread(s)) {
+    const ud = el('span', 's-unread')
+    ud.setAttribute('aria-label', '未读')
+    row1.appendChild(ud)
+  }
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
   card.appendChild(row1)
-  if (s.lastPreview) card.appendChild(el('div', 's-preview', s.lastPreview))
-  else if (s.cwd) card.appendChild(el('div', 's-preview', s.cwd))
+  // 第二行只放“最后一条消息”摘要；不再把绝对路径当预览。没有摘要时宁缺毋滥，
+  // 空白的新会话给一句「还没有消息」，其余交给行尾的工作区标签补上下文。
+  const prev = previewText(s.lastPreview)
+  if (prev) card.appendChild(el('div', 's-preview', prev))
+  else if (s.blank) card.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
+  else if (!showWs) {
+    const wl = wsLabelOf(s)
+    if (wl) card.appendChild(el('div', 's-preview s-preview-empty', wl))
+  }
   const row3 = el('div', 'row3')
   const [cls, label] = statusBadge(s)
-  const b = el('span', 'badge ' + cls)
-  b.appendChild(el('span', 'b-dot'))
-  b.appendChild(el('span', null, label))
-  row3.appendChild(b)
-  if (s.agentPreset) row3.appendChild(el('span', 's-meta', s.agentPreset))
-  // 时间视图：平铺无分组，卡片上标注所属工作区，保持上下文可辨
-  if (showWs) {
-    const ws = findWs(s)
-    if (ws) {
-      const name = ws.title || (ws.path || '').split('/').filter(Boolean).slice(-2).join('/')
-      row3.appendChild(el('span', 's-ws', name || '工作区'))
-    }
+  // 「空闲」对每一行都成立，重复出现只会抢注意力；只在真的要你处理/正在跑时才出徽标。
+  if (cls !== 'done') {
+    const b = el('span', 'badge ' + cls)
+    b.appendChild(el('span', 'b-dot'))
+    b.appendChild(el('span', null, label))
+    row3.appendChild(b)
   }
-  card.appendChild(row3)
+  if (s.agentPreset) row3.appendChild(el('span', 's-meta', s.agentPreset))
+  // 时间视图：卡片上标注所属工作区，保持上下文可辨（工作区视图本身已分组，不重复）
+  if (showWs) {
+    const name = wsLabelOf(s)
+    if (name) row3.appendChild(el('span', 's-ws', name))
+  }
+  if (row3.children.length) card.appendChild(row3)
   card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
   card.onclick = () => { if (swipeState.openWrap) { closeSwipe() ; return } open() }
@@ -2604,7 +2728,10 @@ function applyStats(s, values) {
   if (values.contextBreakdown && typeof values.contextBreakdown.messageTokens === 'number') { s.ctxBreakdown = values.contextBreakdown; changed = true }
   if (values.tokenUsage && typeof values.tokenUsage.outputTokens === 'number') { s.tokenUsage = values.tokenUsage; changed = true }
   if (values.sessionStats && typeof values.sessionStats.turns === 'number') { s.sessionStats = values.sessionStats; changed = true }
-  if (Array.isArray(values.turnOutline)) s.turnOutline = values.turnOutline   // 轮起点兜底要用（本轮起始 seq）
+  if (Array.isArray(values.turnOutline)) {
+    s.turnOutline = values.turnOutline   // 轮起点兜底要用（本轮起始 seq）；列表预览也用它
+    noteOutlinePreview(s)
+  }
   if (changed && S.current === s.id) {
     updateCtxBar(s)
     if (sheetSession === s.id) renderSheetSoon(s)
@@ -4568,6 +4695,83 @@ function initSheetDrag() {
 /* ================= 新会话 ================= */
 let newSel = null
 let newPreset = null
+/* Agent 临时 worktree 不进新会话首屏：它们是 agent 的工作目录，不是用户项目。
+   仍然保留在「更改工作区」面板的临时区里，需要时可选。 */
+function wsShortName(w) {
+  if (!w) return '工作区'
+  return w.title || String(w.path || '').split('/').filter(Boolean).pop() || '工作区'
+}
+function newWorkspaceChoices() {
+  const all = S.workspaces || []
+  const user = all.filter((w) => !TEMP_WS_RE.test(w.path || ''))
+  const temp = all.filter((w) => TEMP_WS_RE.test(w.path || ''))
+  return { user: user.length ? user : all, temp: user.length ? temp : [] }
+}
+function renderNewWsPicker() {
+  const wrap = $('#new-ws-list')
+  if (!wrap) return
+  wrap.textContent = ''
+  const { user, temp } = newWorkspaceChoices()
+  const all = user.concat(temp)
+  const w = all.find((x) => x.workspaceId === newSel) || all[0]
+  if (!w) return
+  newSel = w.workspaceId
+  const row = btnize(el('div', 'pick-ws new-ws-current'))
+  row.setAttribute('aria-label', '选择工作区，当前 ' + wsShortName(w))
+  const wi = el('div', 'ws-ico'); wi.appendChild(icon('folder', 17))
+  row.appendChild(wi)
+  const mid = el('div'); mid.style.minWidth = '0'; mid.style.flex = '1'
+  mid.appendChild(el('div', 'ws-name', wsShortName(w)))
+  mid.appendChild(el('div', 'ws-path', w.path || ''))
+  row.appendChild(mid)
+  row.appendChild(el('span', 'ws-change', '更改'))
+  row.appendChild(el('span', 'r-chev', '›'))
+  row.onclick = () => { vibrate(8); openNewWsPicker() }
+  wrap.appendChild(row)
+}
+function openNewWsPicker() {
+  let ov = $('#ws-ov')
+  if (!ov) {
+    ov = el('div', 'sheet-overlay')
+    ov.id = 'ws-ov'
+    ov.setAttribute('aria-hidden', 'true')
+    ov.innerHTML = '<div class="sheet q-sheet" role="dialog" aria-label="选择工作区"><div class="grabber"></div><div class="qd-head"><span class="qd-title">选择工作区</span><button class="think-close" id="ws-close" type="button" aria-label="关闭">✕</button></div><div class="qd-list" id="ws-pick-list"></div></div>'
+    document.querySelector('#app').appendChild(ov)
+    ov.addEventListener('click', (e) => { if (e.target === ov) closeNewWsPicker() })
+    $('#ws-close').onclick = closeNewWsPicker
+  }
+  renderNewWsList()
+  ovSet('ws-ov', true)
+}
+function closeNewWsPicker() { ovSet('ws-ov', false) }
+function renderNewWsList() {
+  const body = $('#ws-pick-list')
+  if (!body) return
+  body.textContent = ''
+  const { user, temp } = newWorkspaceChoices()
+  const add = (w) => {
+    const row = btnize(el('div', 'pick-ws' + (w.workspaceId === newSel ? ' sel' : '')))
+    const wi = el('div', 'ws-ico'); wi.appendChild(icon('folder', 17))
+    row.appendChild(wi)
+    const mid = el('div'); mid.style.minWidth = '0'
+    mid.appendChild(el('div', 'ws-name', wsShortName(w)))
+    mid.appendChild(el('div', 'ws-path', w.path || ''))
+    row.appendChild(mid)
+    row.appendChild(el('span', 'check', '✓'))
+    row.onclick = () => {
+      newSel = w.workspaceId
+      vibrate(8)
+      closeNewWsPicker()
+      renderNewWsPicker()
+    }
+    body.appendChild(row)
+  }
+  for (const w of user) add(w)
+  if (temp.length) {
+    body.appendChild(el('div', 'ws-pick-sep', 'Agent 临时工作区'))
+    for (const w of temp) add(w)
+  }
+}
 async function renderNew() {
   const wrap = $('#new-ws-list')
   wrap.textContent = ''
@@ -4578,19 +4782,9 @@ async function renderNew() {
     if (btn) { btn.disabled = true; btn.textContent = '暂无可用工作区' }
     return
   }
-  if (!newSel || !S.workspaces.find((w) => w.workspaceId === newSel)) newSel = S.workspaces[0].workspaceId
-  for (const w of S.workspaces) {
-    const row = btnize(el('div', 'pick-ws' + (w.workspaceId === newSel ? ' sel' : '')))
-    const wi = el('div', 'ws-ico'); wi.appendChild(icon('folder', 17))
-    row.appendChild(wi)
-    const mid = el('div'); mid.style.minWidth = '0'
-    mid.appendChild(el('div', 'ws-name', w.title || w.path))
-    mid.appendChild(el('div', 'ws-path', w.path))
-    row.appendChild(mid)
-    row.appendChild(el('span', 'check', '✓'))
-    row.onclick = () => { newSel = w.workspaceId; vibrate(8); wrap.querySelectorAll('.pick-ws').forEach((x) => x.classList.remove('sel')); row.classList.add('sel') }
-    wrap.appendChild(row)
-  }
+  const choices = newWorkspaceChoices()
+  if (!newSel || !choices.user.concat(choices.temp).find((w) => w.workspaceId === newSel)) newSel = choices.user[0].workspaceId
+  renderNewWsPicker()
   // Agent 预设
   const prow = $('#preset-row')
   prow.textContent = ''
@@ -6060,7 +6254,7 @@ function buildShell() {
   })
   document.querySelectorAll('[data-act-ic]').forEach((slot) => { slot.appendChild(icon(slot.dataset.actIc, 16)) })
   const gh = (id, ic, text) => { const g = $(id); g.appendChild(icon(ic, 14)); g.appendChild(el('span', null, text)) }
-  gh('#ws-group-h', 'folder', '选择工作区')
+  gh('#ws-group-h', 'folder', '工作区')
   gh('#preset-group-h', 'robot', 'Agent 预设')
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', () => { renderList(); scheduleGlobSearch() })
@@ -6408,7 +6602,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'img-viewer': () => ovSet('img-viewer', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
