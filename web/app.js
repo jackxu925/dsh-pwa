@@ -6673,6 +6673,36 @@ buildShell()
    注意：不要在启动时无条件钉像素高度 —— iOS 独立 PWA 首屏的 vv 值不可靠，
    会把整个页面压短、底部留出大片黑边。 */
 let keyboardLikelyOpen = false
+const EDITABLE_FOCUS_SEL = '.input-box, .new-input, .q-edit-box, .auth-input, input, textarea, [contenteditable]'
+/* 焦点输入框的可视区校正：iOS 只保证「页面级」滚动，不会替 #app 这种固定布局里的
+   内层滚动容器自动补位——新会话页的 #new-input 在 .scroll 里，键盘一压下来，
+   输入框下缘（以及新输入的行）就落在键盘后面，只能手动上滑。这里只把被盖住的
+   那一段滚出来；已经完整可见就什么都不做，不跟用户抢滚动。 */
+function revealFocusedEditable() {
+  const el = document.activeElement
+  if (!el || el === document.body) return false
+  if (!el.isContentEditable && el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return false
+  const vv = window.visualViewport
+  const visibleTop = vv ? vv.offsetTop : 0
+  const visibleBottom = visibleTop + (vv ? vv.height : window.innerHeight)
+  const margin = 12
+  let r = el.getBoundingClientRect()
+  if (r.top >= visibleTop && r.bottom <= visibleBottom - margin) return true
+  // 找最近的可滚动祖先：直接改它的 scrollTop，不会把外层列表/整页一起带走
+  let sc = el.parentElement
+  while (sc && sc !== document.body && sc !== document.documentElement) {
+    const oy = getComputedStyle(sc).overflowY
+    if ((oy === 'auto' || oy === 'scroll') && sc.scrollHeight > sc.clientHeight + 1) break
+    sc = sc.parentElement
+  }
+  if (!sc || sc === document.body || sc === document.documentElement) return false
+  // 滚动容器的下缘可能比可视区更高（抽屉/面板）：以两者更靠上的那条边为准
+  const clipBottom = Math.min(visibleBottom, sc.getBoundingClientRect().bottom)
+  r = el.getBoundingClientRect()
+  const delta = r.bottom > clipBottom - margin ? r.bottom - (clipBottom - margin) : (r.top < visibleTop ? r.top - visibleTop - margin : 0)
+  if (delta) sc.scrollTop += delta
+  return true
+}
 if (window.visualViewport) {
   const app = $('#app')
   const applyVV = () => {
@@ -6684,15 +6714,32 @@ if (window.visualViewport) {
     if (keyboardLikelyOpen && vv.height < window.innerHeight - 120) {
       app.style.top = Math.round(vv.offsetTop) + 'px'
       app.style.height = Math.round(vv.height) + 'px'
+      // 钉高之后再补位：键盘高度变了，原本「看得见」的输入框可能已落到键盘下面
+      revealFocusedEditable()
     } else {
       app.style.top = ''
       app.style.height = ''
     }
   }
   window.visualViewport.addEventListener('resize', applyVV)
+  // iOS 键盘弹起/收起时还可能只平移可视视口（offsetTop 变化、没有 resize）：
+  // 不跟这帧同步 top，应用会比可视区偏下一截，输入框重新被键盘盖住
+  window.visualViewport.addEventListener('scroll', applyVV)
   // 只在输入框聚焦（键盘弹起）时才钉高度：独立 PWA 首屏 vv 值不可靠
-  document.addEventListener('focusin', (e) => { if (e.target.closest && e.target.closest('.input-box, .new-input, .q-edit-box, .auth-input, input, [contenteditable]')) { keyboardLikelyOpen = true; applyVV() } })
+  document.addEventListener('focusin', (e) => {
+    if (e.target.closest && e.target.closest(EDITABLE_FOCUS_SEL)) {
+      keyboardLikelyOpen = true
+      applyVV()
+      revealFocusedEditable()
+    }
+  })
   document.addEventListener('focusout', () => { keyboardLikelyOpen = false; applyVV() })
+  // 输入过程中输入框会长高（新会话首条消息没有高度上限）：每输入一次补一次位，
+  // 保证正在写的那一行不滑到键盘后面。已完整可见时 revealFocusedEditable 是空操作。
+  document.addEventListener('input', (e) => {
+    if (!keyboardLikelyOpen || !e.target || !e.target.closest || !e.target.closest(EDITABLE_FOCUS_SEL)) return
+    revealFocusedEditable()
+  })
 }
 window.addEventListener('hashchange', route)
 document.addEventListener('visibilitychange', () => {
