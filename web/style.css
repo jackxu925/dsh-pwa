@@ -266,6 +266,7 @@ html.light .rm-del { background:rgba(255,69,58,.1); }
 .ext-chip.c-md { background:rgba(59,130,246,.16); color:var(--accent); }
 html.light .ext-chip.c-md { color:#2563eb; }
 /* 文件预览单 */
+#fp-ov .q-sheet { max-height:88%; }  /* 视频预览比文本高：给足高度，分享/打开按钮不必滚动去找 */
 .fp-meta { display:flex; gap:12px; align-items:center; padding:12px 16px 0; }
 .fp-mid { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; }
 .fp-name { font-size:15px; font-weight:700; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -274,6 +275,7 @@ html.light .ext-chip.c-md { color:#2563eb; }
 .fp-body { padding:12px 16px 4px; min-height:60px; }
 .fp-body.fit-img { display:flex; justify-content:center; }
 .fp-img { max-width:100%; max-height:46vh; border-radius:12px; border:.5px solid var(--line); }
+.fp-video { display:block; width:100%; max-height:46vh; border-radius:12px; border:.5px solid var(--line); background:#000; }
 .fp-text {
   font-size:12.5px; line-height:1.6; color:var(--text); white-space:pre-wrap; word-break:break-word;
   background:var(--bg-card); border-radius:12px; padding:10px 12px;

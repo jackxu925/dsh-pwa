@@ -2024,12 +2024,15 @@ function goRemSession(t) {
 }
 /* ================= 交付物 + 工作区文件 =================
    交付物来自持久事件 deliverables/presented（files[].path 为宿主绝对路径）；
-   文件字节走 GET /api/file?path=<abs>（同源 cookie 鉴权，20MiB 上限，mime 按扩展名）；
+   图片字节走 GET /api/file?path=<abs>（同源 cookie 鉴权，20MiB 上限，mime 按扩展名）；
+   视频与分享走 GET /api/pwa.file?path=<abs>（插件自带的鉴权流式路由，支持 Range，无 20MiB 上限）；
    「在 Mac 上打开」走 POST /api/present.open?sessionId&seq&index（交付物专用，旧会话可用）；
    工作区浏览走 workspaceFiles/{list,stat,read}（首参 wire 名 workspaceFileScopeId = 会话 id）；
    workspace/changes 的明细（/api/changes.summary）只在会话还活着时可查，404 就地降级。 */
 const EXT_TEXT = new Set(['md', 'txt', 'json', 'js', 'ts', 'mjs', 'css', 'csv', 'log', 'xml', 'yml', 'yaml', 'sh', 'py', 'html', 'htm', 'svg'])
 const EXT_IMG = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'ico', 'bmp'])
+const EXT_VIDEO = new Set(['mp4', 'm4v', 'mov', 'webm', 'ogv'])
+const mediaFileUrl = (absPath) => '/api/pwa.file?path=' + encodeURIComponent(absPath)
 function extOf(p) { const m = String(p || '').split('/').pop().match(/\.([A-Za-z0-9]+)$/); return m ? m[1].toLowerCase() : '' }
 function extLabel(ext) {
   if (!ext) return 'FILE'
@@ -2127,11 +2130,19 @@ function ensureOvSheet(id, title, listId) {
   }
   return ov
 }
-/* 文件预览单：图片内联（/api/file → blob），文本读首页（workspaceFiles/read），二进制只给动作。
-   origin（交付物）专享「在 Mac 上打开」（present.open）；工作区文件用 openWorkspacePath。 */
+/* 关单/换文件时彻底停掉内联播放器：pause + 移除 src + load() 会中断 Range 流。 */
+function stopVideos(root) {
+  if (!root) return
+  for (const v of root.querySelectorAll('video')) {
+    try { v.pause(); v.removeAttribute('src'); v.load() } catch (e) {}
+  }
+}
+/* 文件预览单：图片内联（/api/file → blob）、视频内联（/api/pwa.file，支持 Range/拖动进度）、
+   文本读首页（workspaceFiles/read），其余二进制只给动作。 */
 function openFilePreview(s, opts) {
   ensureOvSheet('fp-ov', '文件', 'fp-list')
   const list = $('#fp-list')
+  stopVideos(list)
   list.textContent = ''
   const ext = extOf(opts.absPath)
   const meta = el('div', 'fp-meta')
@@ -2146,6 +2157,7 @@ function openFilePreview(s, opts) {
   list.appendChild(body)
   const renderPreview = (kind, data) => {
     body.textContent = ''
+    body.classList.remove('fit-img')
     if (kind === 'img') {
       const url = URL.createObjectURL(data)
       const img = el('img', 'fp-img')
@@ -2153,6 +2165,18 @@ function openFilePreview(s, opts) {
       img.alt = opts.name
       body.appendChild(img)
       body.classList.add('fit-img')
+    } else if (kind === 'video') {
+      const video = el('video', 'fp-video')
+      video.controls = true
+      video.playsInline = true
+      video.setAttribute('playsinline', '')
+      video.preload = 'metadata'
+      video.addEventListener('error', () => {
+        body.textContent = ''
+        body.appendChild(el('div', 'fp-none', '这个视频无法在浏览器里播放（编码可能不受支持）——可以分享，或在 Mac 上打开'))
+      })
+      video.src = data
+      body.appendChild(video)
     } else if (kind === 'text') {
       const pre = el('div', 'fp-text', data)
       body.appendChild(pre)
@@ -2162,7 +2186,10 @@ function openFilePreview(s, opts) {
     }
   }
   const loadPreview = () => {
-    if (EXT_IMG.has(ext)) {
+    if (EXT_VIDEO.has(ext)) {
+      // 视频走流式路由直接做 <video> 源：不整包进内存，播放器自己按 Range 拖动。
+      renderPreview('video', mediaFileUrl(opts.absPath))
+    } else if (EXT_IMG.has(ext)) {
       fetch('/api/file?path=' + encodeURIComponent(opts.absPath), { credentials: 'same-origin' }).then((r) => {
         if (!r.ok) throw new Error('HTTP ' + r.status)
         return r.blob()
@@ -2185,8 +2212,12 @@ function openFilePreview(s, opts) {
   share.type = 'button'
   share.onclick = async () => {
     share.disabled = true
+    share.textContent = '准备分享…'
     try {
-      const r = await fetch('/api/file?path=' + encodeURIComponent(opts.absPath), { credentials: 'same-origin' })
+      // 大文件（MP4 常见 20MiB+）必须走流式路由；旧版宿主没有该路由时退回 /api/file，
+      // 小文件仍可分享，大文件会像以前一样报 413。
+      let r = await fetch(mediaFileUrl(opts.absPath), { credentials: 'same-origin' })
+      if (r.status === 404) r = await fetch('/api/file?path=' + encodeURIComponent(opts.absPath), { credentials: 'same-origin' })
       if (!r.ok) throw new Error('HTTP ' + r.status)
       const blob = await r.blob()
       const file = new File([blob], opts.name, { type: blob.type || 'application/octet-stream' })
@@ -2195,8 +2226,10 @@ function openFilePreview(s, opts) {
     } catch (e) {
       const msg = String((e && e.message) || e)
       toast(/分享|share/i.test(msg) && /abort/i.test(msg) ? '已取消分享' : '分享失败：' + msg, !/abort/i.test(msg))
+    } finally {
+      share.disabled = false
+      share.textContent = '分享 / AirDrop'
     }
-    share.disabled = false
   }
   const mac = el('button', 'rm-del fp-mac', '在 Mac 上打开')
   mac.type = 'button'
@@ -5098,6 +5131,7 @@ function ovSet(id, open) {
   if (!ov) return
   ov.classList.toggle('open', open)
   ov.setAttribute('aria-hidden', open ? 'false' : 'true')
+  if (!open) stopVideos(ov)  // 关单时别让内联视频继续在后台出声/耗流量
   if (typeof ovPush === 'function') { open ? ovPush(id) : ovPop(id) }
 }
 function closeSheet() { sheetSession = null; closeSubPanel(); ovSet('sheet-overlay', false) }
