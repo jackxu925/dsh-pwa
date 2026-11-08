@@ -34,7 +34,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 🔎 **Global search**: local title/path filtering plus full-text message search (`session/search`) with highlighted snippets that jump straight to the session
 - 💬 **Streaming chat**: optimistic send, per-day dividers, timestamps, code-copy buttons, full-screen image viewer; dual send modes — queue while running, long-press to steer — and queued messages can be edited / steered / removed
 - ✅ Approvals & ❓ agent questions as tappable cards (dangerous commands get a red double-confirm)
-- 📦 **Deliverables & workspace files**: files the agent `present`s become timeline cards (inline image preview, direct text read) with share/AirDrop and open-on-Mac actions; the ⋯ menu browses the whole session workspace with per-turn change hints
+- 📦 **Deliverables & workspace files**: files the agent `present`s become timeline cards (inline image and video preview, direct text read) with share/AirDrop and open-on-Mac actions; the ⋯ menu browses the whole session workspace with per-turn change hints
 - ⏰ **Reminder center**: a third home tab lists every reminder your agents created — humanized schedules, next-fire countdowns, delivery history; delete in place or jump back to the origin session to reschedule
 - 👍👎 **Message feedback**: thumbs up/down on any assistant message (tap again to retract), synced live with the desktop feedback store
 - 🧠 **Context transparency**: per-turn stats (duration / TTFT / decode speed / tokens), a reasoning drawer, TTS read-aloud, and **compaction markers** — when older context is condensed into a summary, the timeline says so and shows the summary
@@ -84,7 +84,7 @@ dsh --profile web --host 0.0.0.0 --port 3080 --trusted-host <your-access-domain>
    - Same LAN/Wi-Fi: `<host>` is the server's LAN IP.
    - Away from home: use [Tailscale](https://tailscale.com) — add your Tailscale hostname to `--trusted-host` in step 2 (Tailscale must be running on both the server and the phone, logged into the same account), then open `http://<tailscale-hostname>:3080/m/`.
 
-Upgrade later with `npm update dsh-pwa` and a `dsh web` restart. The plugin only mounts static files; the page speaks DSH's own `/api`, so it moves with your DSH version (developer-preview caveat in the FAQ below).
+Upgrade later with `npm update dsh-pwa` and a `dsh web` restart. The plugin mounts the static surface plus one authenticated streaming route for large deliverable files; the page speaks DSH's own `/api`, so it moves with your DSH version (developer-preview caveat in the FAQ below).
 
 > **Enabling global search**: the shipped web bundle keeps the full-text index off; set `session-query-sqlite` → `openAt: first-search` in your profile patch. Note: the 0.2.1-rc.x indexer requires a write-free persistence window while building, which conflicts with resident bots (ds-bot heartbeats every 20–40 s) — pick one until upstream relaxes the quiescence check.
 

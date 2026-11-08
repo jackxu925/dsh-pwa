@@ -49,3 +49,7 @@ dispose()
 if (handlers.size !== 0) throw new Error('dispose() did not unregister routes')
 
 console.log(`smoke: OK (${expected.length} routes, /m/health 200, dispose clean)`)
+
+// The media route's unit test rides this existing CI step (the agent token cannot
+// edit .github/workflows): importing it runs its assertions and summary here.
+await import('./media.mjs')
