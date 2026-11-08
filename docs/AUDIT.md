@@ -197,6 +197,13 @@
 
 | 150 | 用户反馈（真机）：交付物里的 MP4（22 MB）在手机上点开没有播放器，只有「这类文件不做内联预览」；点「分享 / AirDrop」提示「分享失败：HTTP 413」 | 根因：交付物字节全走宿主 `/api/file`，该路由按图片上限（默认 20 MiB）返回 413；前端也只给图片做内联预览，MP4 归入「二进制只给动作」。修：插件新增鉴权流式路由 `GET /api/pwa.file?path=<abs>`（`ctx.connection.fetch.register`，同一 owner cookie / Host-Origin fence，`ctx.fs` 读取，4 MiB 分段 + HTTP Range/206/416，支持拖动进度，不整包进宿主内存）；预览单给 `mp4/m4v/mov/webm/ogv` 直接挂 `<video controls playsinline preload=metadata>`（编码不支持时就地降级成说明），其余二进制文案不变；分享改为走该路由取 File（旧宿主 404 时退回 `/api/file`），大文件不再 413，取字节期间按钮显示「准备分享…」。实测（真实页面 + 宿主真实会话 + 23.8 MB 交付物，390×844 移动视口）：修复前预览无播放器、分享 toast 413；修复后视频内联可播、可拖动（8.5s），分享交给 `navigator.share` 的 File 为 `video/mp4`、23801256 字节（与原文件一致），关单即停播。`node test/media.mjs` 覆盖 200/206/416/HEAD、分段上限、MIME 与 fs 错误映射；对照证据见 `docs/evidence/mp4-share-413-2026-11/` | ✅ |
 
+## 第四轮（2026-11-08 · Agent 团队与子会话）
+
+| # | 问题 | 修法 | 状态 |
+|---|---|---|---|
+| 151 | Agent Teams 与子会话在手机上完全不可见：桌面已经有团队面板和子会话谱系，PWA 的 `loadBase()` 读到子会话后直接 `continue`——主列表没有团队信号，子会话既不进列表也没有任何入口；一次性子会话更直接坏掉（follow 地址写死 `mode: 'continuable'`，宿主返回 `subagent mode does not match the supplied address`） | 按已确认的 Tailscale 原型实现三处，不加首页 Tab：① `session/list` / control / follow 三个投影入口接 `agentTeam`（成员阶段 + 任务板）与 `subagentCatalog`（mode/label），子会话 metadata 不再提前跳过；Lead 卡片渲染细色条 + 头像叠放 +「N 名成员 / R 运行中 / M 任务进行中」团队线。② Lead 会话头新增团队条（`团队 N` + 运行中/任务进度），点开团队面板：roster 关系图、完整成员行（名字取成员名、副标题取目录 label）、只读任务板（全部/进行中/待领取/完成筛选，任务描述两行点按展开，写入范围重叠最多提示 3 组），投影变化与成员 running 状态实时刷新；⋯ 菜单增加「团队」行。③ 成员子会话：标题用成员名，顶部谱系条显示「上级会话 › 成员名」+ 真实模式 chip（可继续/一次性/模式未知）+「N 个子会话」按需展开；continuable 子会话走 `subagents/prompt` 从父地址继续输入、停止走 `subagents/interruptByParent`，one-shot/unknown 与「上级 Agent 离线」的 continuable 子会话显示只读占位（历史仍可看）；进入子会话后返回/右滑回上级而不是列表。QA：真实团队会话（9 成员 / 20 任务，1 进行中）+ 真实 one-shot/continuable 子会话，390×844 深/浅色与 320×568，成员 sheet 9 行、任务 20 行、进行中筛选 1 行，continuable 子会话 composer 可用、one-shot 与离线父级只读、右滑/返回回上级，零 pageerror / console error、无横向溢出；`node test/smoke.mjs` 通过。对照证据见 `docs/evidence/agent-team-2026-11/` | ✅ |
+| 152 | 团队成员在 Lead 会话里互相发的消息（`agent-message` relay）在手机上完全消失：`user/message` 折叠时把所有非 `source.kind === 'user'` 的消息当「注入上下文」丢掉，团队 bubble 只活在桌面 | 识别 `source.kind === 'agent-message' && form === 'relay'`：剥掉宿主写入的首块「Team message from <name>:」，折成 `peer` 时间线条目——头像 + 发送者名 +「团队消息」标签 + 团队色气泡；发送者名优先取消息前缀，头像色按团队 roster 位置映射；复制按钮保留。实测真实团队会话（向上加载到旧消息后出现 2 条真实 relay）：`recipe-content-a` / `eval-dev` 各一条，文本、时间、团队标签正确，普通注入上下文仍不显示；零 pageerror | ✅ |
+
 ## 仍需协议/服务端配合（本轮未动）
 
 - 列表接口携带稳定可用的末条消息预览与未读计数：当前热会话用 `turnOutline` 投影做零请求预览；无 projection 的冷会话仍回退工作区名，未读只有点、没有计数。
