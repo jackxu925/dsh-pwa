@@ -95,6 +95,7 @@ const ICONS = {
   thumbDown: SVG_OPEN + '<path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.7a2 2 0 0 0-2 1.7l-1.4 9a2 2 0 0 0 2 2.3zM17 2h2.7A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.3 2H17"/>',
   todo: SVG_OPEN + '<path d="m3 6 2 2 4-4M3 16l2 2 4-4M13 6h8M13 16h8"/></svg>',
   robot: SVG_OPEN + '<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M8 4h8"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>',
+  team: SVG_OPEN + '<circle cx="8" cy="12" r="3"/><circle cx="18" cy="7" r="2"/><circle cx="18" cy="17" r="2"/><path d="M10.6 10.7 16 8.1M10.6 13.3l5.4 2.6"/></svg>',
   globe: SVG_OPEN + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>',
   wrench: SVG_OPEN + '<path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z"/></svg>',
   trash: SVG_OPEN + '<path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2m3 0-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/><path d="M10 11v6M14 11v6"/></svg>',
@@ -299,6 +300,12 @@ function sess(id) {
       loaded: false, hasMore: false, oldestSeq: null,
       createdHere: false,              // 本机创建的会话：即使为空也在列表可见，避免「刚建的会话消失了」
       subagent: false,                 // 子代理会话不在列表显示
+      subagentMode: null,              // one-shot / continuable / external / unknown（父目录或自身投影）
+      agentLabel: null,                // 子会话的创建标签（父目录里的 label）
+      parentSessionId: null,           // 子会话的直接父地址
+      agentAvailable: undefined,       // 宿主 summary：这个会话是否持有活 Agent（可继续输入要求父级在线）
+      team: null,                      // Lead 的 agentTeam 投影（只读）
+      agentCatalog: null,              // 本会话的 subagentCatalog 投影
       items: [],                       // folded chat items（含乐观上屏的 pending 项）
       queue: [],                       // 待发送消息：inbox 投影（next-turn/next-step），兼容旧宿主 queue 帧
       live: null,                      // {turn, step, texts:{idx:text}}
@@ -388,6 +395,173 @@ function noteOutlinePreview(s) {
   const last = arr[arr.length - 1]
   const txt = previewText(last && (last.response || last.prompt))
   if (txt) s.lastPreview = txt
+}
+
+/* ================= Agent 团队 / 子会话 =================
+ * 数据全部来自宿主现成投影，手机端只读：
+ *   agentTeam        Lead 会话里的成员阶段 + 任务板（不写回）
+ *   subagentCatalog  父会话的直接子会话目录（mode/label）
+ *   session/list     子会话行带 origin/parentSessionId，状态叠加到成员行
+ * 子会话不在主列表铺开，只在团队面板 / 成员会话谱系里按需展开。 */
+const TEAM_TONES = ['l', 'r', 'b', 's']
+function teamOf(s) {
+  return s && s.team && Array.isArray(s.team.members) ? s.team : null
+}
+/* 从成员子会话向上找团队根（Lead）；最多 8 层防御异常父子环 */
+function teamRootOf(s) {
+  let cur = s
+  for (let i = 0; cur && cur.subagent && cur.parentSessionId && i < 8; i++) {
+    cur = S.sessions.get(cur.parentSessionId) || sess(cur.parentSessionId)
+  }
+  return cur
+}
+function teamMemberRunning(s, m) {
+  if (!m) return false
+  if (m.role === 'lead') return !!s.running || (m.id !== s.id && !!((S.sessions.get(m.id) || {}).running))
+  const ms = S.sessions.get(m.id)
+  return !!(ms && ms.running)
+}
+function teamStats(s) {
+  const team = teamOf(s)
+  if (!team) return null
+  const members = team.members
+  const tasks = (team.tasks || []).filter((t) => t && t.status !== 'deleted')
+  return {
+    total: members.length,
+    teammates: members.filter((m) => m.role === 'teammate').length,
+    running: members.filter((m) => teamMemberRunning(s, m)).length,
+    provisioning: members.filter((m) => m.phase === 'provisioning').length,
+    failed: members.filter((m) => m.phase === 'failed').length,
+    tasks,
+    active: tasks.filter((t) => t.status === 'in_progress').length,
+    pending: tasks.filter((t) => t.status === 'pending').length,
+    completed: tasks.filter((t) => t.status === 'completed').length,
+  }
+}
+function hasTeamView(s) {
+  const st = teamStats(s)
+  return !!st && (st.total > 1 || st.tasks.length > 0)
+}
+function memberNameOf(s, id) {
+  const team = teamOf(s)
+  const m = team && team.members.find((x) => x.id === id)
+  if (m) return m.name
+  const ms = S.sessions.get(id)
+  return (ms && ms.agentLabel) || (ms && sessTitle(ms)) || '成员'
+}
+function teamTone(idx) {
+  return idx <= 0 ? 'l' : TEAM_TONES[1 + ((idx - 1) % 3)]
+}
+function avInitial(name) {
+  const t = String(name || '?').trim()
+  if (!t) return '?'
+  const c = t[0]
+  return /[a-z]/.test(c) ? c.toUpperCase() : c
+}
+function avNode(name, size, tone) {
+  const a = el('span', 'av av-' + (tone || 'r') + ' av-' + (size || 24), avInitial(name))
+  a.setAttribute('aria-hidden', 'true')
+  return a
+}
+/* 子会话模式标签：目录 mode + 子会话自己的 subagent 投影互为兜底 */
+function subagentModeOf(s) {
+  if (!s) return null
+  if (s.subagentMode) return s.subagentMode
+  const p = s.parentSessionId ? S.sessions.get(s.parentSessionId) : null
+  const entry = p && Array.isArray(p.agentCatalog) && p.agentCatalog.find((x) => x.id === s.id)
+  return (entry && entry.mode) || null
+}
+function subagentModeLabel(mode) {
+  if (mode === 'continuable') return '可继续'
+  if (mode === 'one-shot') return '一次性'
+  if (mode === 'external') return '外部任务'
+  if (mode === 'unknown') return '模式未知'
+  return '子会话'
+}
+/* 子会话可继续则正常输入；一次性 / 模式未知只读 */
+function subagentReadonly(s) {
+  if (!s || !s.subagent) return null
+  const mode = subagentModeOf(s)
+  if (mode === 'one-shot') return { mode, title: '一次性子会话只读', body: '可以查看完整执行记录，不能继续输入。' }
+  if (mode === 'external' || mode === 'unknown') return { mode: mode || 'unknown', title: '这个子会话不能继续', body: '宿主没有可用的可继续地址；完整记录仍可查看。' }
+  // 可继续子会话要求直接上级 Agent 在线（桌面同语义）：上级离线时历史可看，输入不可用
+  const parent = s.parentSessionId ? S.sessions.get(s.parentSessionId) : null
+  if (mode === 'continuable' && parent && parent.agentAvailable === false && !s.running) {
+    return { mode, title: '上级会话未在线', body: '可继续子会话需要直接上级在线；先在上级会话发一条消息，再回来即可继续输入。' }
+  }
+  return null
+}
+/* 团队 relay：宿主把首块写成「Team message from <name>:」，后面才是正文 */
+function parseRelayText(text, senderId) {
+  const raw = String(text || '')
+  const m = raw.match(/^Team message from ([^:\n]+):\s*/)
+  const sender = m ? m[1] : (senderId && S.sessions.get(senderId) && memberNameOf(null, senderId)) || '成员'
+  return { sender, body: m ? raw.slice(m[0].length) : raw }
+}
+function applyChildIdentity(s, sub) {
+  const mode = sub && sub.mode ? sub.mode : null
+  if (mode && s.subagentMode !== mode) {
+    s.subagentMode = mode
+    if (S.current === s.id) refreshChatChrome(s)
+  }
+  if (sub && typeof sub.label === 'string') s.agentLabel = sub.label
+}
+function applyTeam(s, team) {
+  const next = team && Array.isArray(team.members) ? team : null
+  if (JSON.stringify(next) === JSON.stringify(s.team)) return
+  s.team = next
+  if (S.current === s.id) refreshChatChrome(s)
+  if (teamSheetRoot === s.id) renderTeamSheet()
+  renderListSoon()
+}
+function applyCatalog(s, cat) {
+  const next = Array.isArray(cat) ? cat : []
+  if (JSON.stringify(next) === JSON.stringify(s.agentCatalog)) return
+  s.agentCatalog = next
+  for (const entry of next) {
+    if (!entry || !entry.id) continue
+    const c = S.sessions.get(entry.id)
+    if (!c) continue
+    if (!c.parentSessionId) c.parentSessionId = s.id
+    if (!c.subagentMode) c.subagentMode = entry.mode
+    if (!c.agentLabel && entry.label) c.agentLabel = entry.label
+  }
+  if (S.current === s.id) refreshChatChrome(s)
+  if (kidsSheetSession === s.id) renderKidsSheet()
+  renderListSoon()
+}
+/* 目录里的子会话模式补齐到 list 行（list 的缓存投影可能不带 subagent 键） */
+function linkChildModes() {
+  for (const p of S.sessions.values()) {
+    if (!Array.isArray(p.agentCatalog) || !p.agentCatalog.length) continue
+    for (const entry of p.agentCatalog) {
+      if (!entry || !entry.id) continue
+      const c = S.sessions.get(entry.id)
+      if (!c) continue
+      if (!c.parentSessionId) c.parentSessionId = p.id
+      if (!c.subagentMode) c.subagentMode = entry.mode
+      if (!c.agentLabel && entry.label) c.agentLabel = entry.label
+    }
+  }
+}
+/* 打开子会话前补齐它缺的父地址/模式（团队面板点成员时用） */
+function prepareChildSession(id, parentId, mode, label) {
+  const c = sess(id)
+  c.subagent = true
+  if (parentId && !c.parentSessionId) c.parentSessionId = parentId
+  if (mode && !c.subagentMode) c.subagentMode = mode
+  if (label && !c.agentLabel) c.agentLabel = label
+  return c
+}
+/* 团队面板 / 子会话谱系要最新投影：session/list 的缓存块可能落后于刚结束的会话 */
+async function refreshSessionProjections(s) {
+  if (!s || s._projRefreshing || s.subagent) return
+  s._projRefreshing = true
+  try {
+    const v = await rpc('session/projections', { request: { sessionId: s.id } })
+    if (v && v.values) applyProjection(s, v.values)
+  } catch (e) { /* 投影刷新失败就用现有列表值，不打断面板 */ }
+  s._projRefreshing = false
 }
 
 /* ================= 图片 ================= */
@@ -528,7 +702,20 @@ function foldEvent(s, event, view) {
   if (!s._pendingCalls) s._pendingCalls = []
   switch (t) {
     case 'user/message': {
-      if (d.source && d.source.kind && d.source.kind !== 'user') return  // 注入类上下文不显示（插话的持久事件也是 user 来源，靠 rpcId 与乐观回显对上）
+      // 团队成员之间互发的消息是 user/message + agent-message(relay)：以前被当成「注入上下文」丢掉，
+      // 手机端就完全看不到队友说了什么。这里单独折成 peer 气泡；其余注入类来源仍然不显示。
+      const src = d.source || {}
+      const relayText = src.kind === 'agent-message' && src.form === 'relay' ? textOf(d.content) : ''
+      // 只有 Team 服务写入的 relay 带「Team message from <name>:」前缀；其它 agent-message
+      //（如 Superagent 的工单投递）仍是注入上下文，保持不显示。
+      if (/^Team message from [^:\n]+:/.test(relayText)) {
+        const parsed = parseRelayText(relayText, src.senderSessionId)
+        if (!parsed.body.trim()) return
+        s.items.push({ kind: 'peer', text: parsed.body, senderName: parsed.sender, senderId: src.senderSessionId || null, time: event.time, seq: event.seq })
+        s.lastPreview = previewText(parsed.body)
+        break
+      }
+      if (src.kind && src.kind !== 'user') return  // 注入类上下文不显示（插话的持久事件也是 user 来源，靠 rpcId 与乐观回显对上）
       const text = textOf(d.content)
       const images = imageBlocksOf(d.content)
       if (!text.trim() && !images.length) return
@@ -1169,6 +1356,8 @@ function renderChat(s, forceScroll) {
     sc.appendChild(itemNode(s, item))
   }
   renderChatPending(s, sc)
+  const kidsCard = subkidsCard(s)
+  if (kidsCard) sc.appendChild(kidsCard)
   reapplyFlash(s, sc)   // 跳转高亮跨重建续命
   syncLivePill(s)   // 运行中的轮：实时统计 pill（挂在刚刷出来的节点上）
   if (anchor) restoreAnchor(sc, anchor)
@@ -1309,6 +1498,7 @@ function itemKey(item) {
   if (item.kind === 'user') return item.seq != null ? 'u' + item.seq : (item.rpcId ? 'r' + item.rpcId : null)
   if (item.kind === 'assistant') return item.seq != null ? 'a' + item.seq : null
   if (item.kind === 'tool') return item.callId ? 't' + item.callId : null
+  if (item.kind === 'peer') return item.seq != null ? 'p' + item.seq : null
   return null
 }
 function itemNode(s, item) {
@@ -1362,6 +1552,39 @@ function itemNodeInner(s, item) {
         meta.onclick = () => retrySend(s, item)
       }
       m.appendChild(meta)
+      return m
+    }
+    case 'peer': {
+      // 队友消息：头像 + 名字 + 「团队消息」标签，气泡用偏青的团队色区分
+      const root = teamRootOf(s) || s
+      const team = teamOf(root)
+      const idx = team ? team.members.findIndex((x) => x.id === item.senderId) : -1
+      const m = el('div', 'msg peer')
+      const head = el('div', 'peer-head')
+      head.appendChild(avNode(item.senderName, 22, idx >= 0 ? teamTone(idx) : 'r'))
+      head.appendChild(el('span', 'peer-name', item.senderName))
+      head.appendChild(el('span', 'peer-tag', '团队消息'))
+      head.appendChild(el('span', 'peer-time', fmtTime(item.time)))
+      const b = el('div', 'bubble')
+      if (item.text) b.innerHTML = md(item.text)
+      if (item.images) for (const img of item.images) {
+        if (img.previewUrl) {
+          const im = el('img', 'msg-img')
+          im.src = img.previewUrl
+          im.alt = img.name || '图片'
+          if (img.width && img.height) im.style.aspectRatio = img.width + ' / ' + img.height
+          b.appendChild(im)
+        } else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
+      }
+      m.append(head, b)
+      if (item.text) {
+        const meta = el('div', 'meta-row')
+        meta.appendChild(el('span', 'meta-time', fmtTime(item.time)))
+        const cp = metaIcon('copy', '复制这条消息')
+        cp.onclick = () => { vibrate(8); copyText(item.text, (ok) => toast(ok ? '已复制 ✓' : '复制失败，请重试', !ok)) }
+        meta.appendChild(cp)
+        m.appendChild(meta)
+      }
       return m
     }
     case 'assistant': {
@@ -2397,10 +2620,31 @@ function listScrollTop() {
   const sc = $('#list-scroll')
   if (sc) sc.scrollTop = 0
 }
+/* 列表卡上的团队线：最多 4 个头像，超出用 +N；任务只报进行中，没有进行中才退回完成数 */
+function teamCardLine(s, st) {
+  const team = teamOf(s)
+  const line = el('div', 'team-line')
+  const stack = el('span', 'av-stack')
+  stack.setAttribute('aria-hidden', 'true')
+  const shown = team.members.slice(0, 4)
+  shown.forEach((m, i) => stack.appendChild(avNode(m.name, 24, teamTone(i))))
+  if (team.members.length > shown.length) stack.appendChild(el('span', 'av-more', '+' + (team.members.length - shown.length)))
+  const mid = el('span', 'tl-main')
+  mid.appendChild(el('b', null, st.total + ' 名成员'))
+  mid.appendChild(el('span', null, st.running + ' 运行中'))
+  const task = el('span', 'tl-task')
+  task.appendChild(el('i'))
+  task.appendChild(el('span', null, st.active > 0 ? st.active + ' 任务进行中' : st.completed > 0 ? st.completed + ' 项任务完成' : st.tasks.length + ' 个任务'))
+  line.append(stack, mid, task)
+  return line
+}
 function sessionCard(s, showWs) {
   const card = el('div', 'session-card')
   card.setAttribute('role', 'button')
   card.setAttribute('tabindex', '0')
+  const st = !s.subagent ? teamStats(s) : null
+  const teamCard = !!st && hasTeamView(s)
+  if (teamCard) card.classList.add('team-card')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
   if (isUnread(s)) {
@@ -2418,6 +2662,13 @@ function sessionCard(s, showWs) {
   else if (!showWs) {
     const wl = wsLabelOf(s)
     if (wl) card.appendChild(el('div', 's-preview s-preview-empty', wl))
+  }
+  // Lead 卡上的团队信号：成员头像 + 运行中人数 + 任务进度；子会话不铺进主列表。
+  if (teamCard) {
+    const rail = el('span', 'team-rail')
+    rail.setAttribute('aria-hidden', 'true')
+    card.appendChild(rail)
+    card.appendChild(teamCardLine(s, st))
   }
   const row3 = el('div', 'row3')
   const [cls, label] = statusBadge(s)
@@ -2676,7 +2927,7 @@ function applyListValues(s, values) {
     s.title = values.title
     // 列表刷新拿到新标题时，若正开着该会话，同步顶栏（否则分叉后 loadBase 先到、投影去重，
     // header 会一直卡在 openSession 那一刻读到的"新会话"）
-    if (changed && S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = sessTitle(s) }
+    if (changed && S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = chatTitleOf(s) }
   }
   if (values.permissions && (typeof values.permissions.currentValue === 'string' || Array.isArray(values.permissions.options))) {
     s.permissions = { ...(s.permissions || {}), ...values.permissions }
@@ -2691,6 +2942,9 @@ function applyListValues(s, values) {
   if (values.modelSelection && values.modelSelection.next) s.modelSel = values.modelSelection.next
   if ('todos' in values) setTodos(s, values.todos)
   if ('inbox' in values) applyInboxQueue(s, values.inbox)
+  if ('agentTeam' in values) applyTeam(s, values.agentTeam)
+  if ('subagentCatalog' in values) applyCatalog(s, values.subagentCatalog)
+  if ('subagent' in values) applyChildIdentity(s, values.subagent)
   applyStats(s, values)
 }
 
@@ -2747,6 +3001,431 @@ function renderTaskBar(s) {
     }, 3000)
   }
   if (!allDone && s._todoTimer) { clearTimeout(s._todoTimer); s._todoTimer = null }
+}
+/* ================= Agent 团队 / 子会话 UI =================
+ * 会话内团队条 + 团队面板（只读任务板）+ 成员子会话谱系。
+ * 不新增首页 Tab：团队是 Lead 会话的属性，入口跟着会话走。 */
+let teamSheetRoot = null
+let teamTaskFilter = 'all'
+let kidsSheetSession = null
+
+function chatTitleOf(s) {
+  if (!s) return '新会话'
+  if (s.subagent) {
+    const root = teamRootOf(s)
+    const team = root && teamOf(root)
+    const m = team && team.members.find((x) => x.id === s.id)
+    if (m) return m.name
+    if (s.agentLabel) return s.agentLabel
+  }
+  return sessTitle(s)
+}
+function renderTeamBand(s) {
+  const band = $('#team-band')
+  if (!band) return
+  const st = !s.subagent ? teamStats(s) : null
+  if (!st || !hasTeamView(s)) { band.style.display = 'none'; return }
+  const team = teamOf(s)
+  band.style.display = ''
+  band.textContent = ''
+  const orbits = el('span', 'tb-orbits')
+  orbits.setAttribute('aria-hidden', 'true')
+  team.members.slice(0, 4).forEach((m, i) => orbits.appendChild(avNode(m.name, i === 0 ? 30 : 22, teamTone(i))))
+  if (team.members.length > 4) orbits.appendChild(el('span', 'av-more', '+' + (team.members.length - 4)))
+  const mid = el('span', 'tb-mid')
+  const title = el('span', 'tb-title')
+  title.appendChild(document.createTextNode('团队 '))
+  title.appendChild(el('b', null, String(st.total)))
+  mid.appendChild(title)
+  mid.appendChild(el('span', 'tb-sub', st.running + ' 运行中 · ' + (st.active > 0 ? st.active + ' 任务进行中' : st.completed > 0 ? st.completed + ' 项任务完成' : st.tasks.length + ' 个任务')))
+  const side = el('span', 'tb-side')
+  side.appendChild(el('span', null, '查看'))
+  side.appendChild(icon('chev', 14))
+  band.append(orbits, mid, side)
+  band.setAttribute('aria-label', '打开团队面板：' + st.total + ' 名成员，' + st.running + ' 运行中')
+  band.onclick = () => { vibrate(8); openTeamSheet(s) }
+}
+function renderLineage(s) {
+  const lin = $('#chat-lineage')
+  if (!lin) return
+  if (!s.subagent) { lin.style.display = 'none'; return }
+  lin.style.display = ''
+  const parent = s.parentSessionId ? (S.sessions.get(s.parentSessionId) || sess(s.parentSessionId)) : null
+  const parentBtn = $('#lineage-parent')
+  parentBtn.textContent = parent ? chatTitleOf(parent) : '上级会话'
+  parentBtn.onclick = () => { if (!s.parentSessionId) return; vibrate(8); location.hash = '#/s/' + s.parentSessionId }
+  $('#lineage-name').textContent = chatTitleOf(s)
+  const mode = subagentModeOf(s)
+  const chip = $('#lineage-mode')
+  chip.textContent = subagentModeLabel(mode)
+  chip.classList.toggle('warn', mode === 'one-shot' || mode === 'unknown')
+  const kidsBtn = $('#kids-btn')
+  const n = Array.isArray(s.agentCatalog) ? s.agentCatalog.length : 0
+  kidsBtn.style.display = n ? '' : 'none'
+  kidsBtn.textContent = n + ' 个子会话'
+  kidsBtn.onclick = () => { vibrate(8); openKidsSheet(s) }
+}
+function renderReadonlyComposer(s) {
+  const box = $('#ro-composer')
+  if (!box) return
+  const ro = subagentReadonly(s)
+  const composer = document.querySelector('#view-chat .composer')
+  box.style.display = ro ? '' : 'none'
+  if (composer) composer.style.display = ro ? 'none' : ''
+  box.classList.toggle('one-shot', !!ro && ro.mode === 'one-shot')
+  if (ro) {
+    $('#ro-title').textContent = ro.title
+    $('#ro-body').textContent = ro.body
+  }
+}
+function openTeamSheet(s) {
+  const root = teamRootOf(s || (S.current ? sess(S.current) : null))
+  if (!root) return
+  if (!teamOf(root)) { toast('这个会话还没有团队', true); return }
+  teamSheetRoot = root.id
+  teamTaskFilter = 'all'
+  renderTeamSheet()
+  const tb = $('#team-body'); if (tb) tb.scrollTop = 0
+  ovSet('team-ov', true)
+  vibrate(8)
+  refreshSessionProjections(root)
+}
+function closeTeamSheet() {
+  teamSheetRoot = null
+  ovSet('team-ov', false)
+}
+function memberStatusNode(root, m) {
+  if (m.phase === 'provisioning') {
+    const c = el('span', 'mini-chip warm')
+    c.appendChild(el('span', 'spin-dot'))
+    c.appendChild(el('span', null, '启动中'))
+    return c
+  }
+  if (m.phase === 'failed') return el('span', 'mini-chip fail', '创建失败')
+  if (teamMemberRunning(root, m)) {
+    const b = el('span', 'badge running')
+    b.appendChild(el('span', 'b-dot'))
+    b.appendChild(el('span', null, '运行中'))
+    return b
+  }
+  return el('span', 'badge done', '空闲')
+}
+function teamMemberSub(root, m) {
+  const child = S.sessions.get(m.id)
+  if (m.role === 'lead') return chatTitleOf(root)
+  const label = (child && child.agentLabel) || (Array.isArray(root.agentCatalog) && (root.agentCatalog.find((x) => x.id === m.id) || {}).label)
+  if (label) return label
+  if (child && child.lastPreview) return previewText(child.lastPreview)
+  if (m.phase === 'provisioning') return '正在创建成员会话'
+  if (m.phase === 'failed') return m.error || '成员创建失败'
+  return 'Teammate'
+}
+function teamMemberRow(root, m, idx) {
+  const isLead = m.role === 'lead'
+  const child = S.sessions.get(m.id)
+  const blocked = m.phase === 'provisioning' || (m.phase === 'failed' && !child)
+  const row = blocked ? el('div', 'member-row disabled') : el('button', 'member-row')
+  if (!blocked) row.type = 'button'
+  row.appendChild(avNode(m.name, 34, teamTone(idx)))
+  const mid = el('span', 'mem-mid')
+  const name = el('b')
+  name.appendChild(document.createTextNode(m.name))
+  name.appendChild(el('em', null, isLead ? 'Lead' : 'Teammate'))
+  mid.appendChild(name)
+  mid.appendChild(el('span', null, teamMemberSub(root, m)))
+  row.appendChild(mid)
+  const side = el('span', 'mem-side')
+  if (isLead && S.current === root.id) side.appendChild(el('span', 'mini-chip', '当前会话'))
+  else if (!isLead && S.current === m.id) side.appendChild(el('span', 'mini-chip', '这里'))
+  else side.appendChild(memberStatusNode(root, m))
+  if (!isLead && !blocked) side.appendChild(icon('chev', 14))
+  row.appendChild(side)
+  if (!blocked) {
+    row.onclick = () => {
+      vibrate(8)
+      if (isLead) {
+        closeTeamSheet()
+        if (S.current !== root.id) location.hash = '#/s/' + root.id
+        return
+      }
+      const mode = (child && subagentModeOf(child)) || (Array.isArray(root.agentCatalog) && (root.agentCatalog.find((x) => x.id === m.id) || {}).mode)
+      openChildChat(m.id, root.id, mode, child && child.agentLabel)
+    }
+  }
+  return row
+}
+function taskStatusNode(t) {
+  const st = el('span', 'task-st')
+  if (t.status === 'completed') {
+    st.classList.add('done')
+    st.appendChild(icon('check', 14))
+  } else if (t.status === 'in_progress') {
+    st.classList.add('run')
+    st.appendChild(el('i'))
+  } else if (t.ready) {
+    st.classList.add('ready')
+    st.appendChild(el('i'))
+  } else {
+    st.classList.add('blocked')
+    st.appendChild(el('i'))
+  }
+  return st
+}
+function taskStateText(t) {
+  if (t.status === 'completed') return { text: '完成', cls: 'ok' }
+  if (t.status === 'in_progress') return { text: '进行中', cls: '' }
+  return t.ready ? { text: '可领取', cls: 'muted' } : { text: '被阻塞', cls: 'muted' }
+}
+function teamTaskRow(t) {
+  const row = el('div', 'task-row')
+  row.dataset.status = t.status
+  row.appendChild(taskStatusNode(t))
+  const mid = el('span', 'task-mid')
+  mid.appendChild(el('b', null, t.subject || t.id))
+  const owner = t.ownerName || '未认领'
+  const scope = Array.isArray(t.writeScopes) && t.writeScopes.length ? ' · ' + t.writeScopes[0] + (t.writeScopes.length > 1 ? ' +' + (t.writeScopes.length - 1) : '') : ''
+  const meta = el('small')
+  meta.appendChild(el('span', 'task-id', t.id))
+  meta.appendChild(document.createTextNode(' · ' + owner + scope))
+  mid.appendChild(meta)
+  if (t.description) { const desc = el('div', 'task-desc'); desc.innerHTML = md(t.description); mid.appendChild(desc) }
+  row.appendChild(mid)
+  const s = taskStateText(t)
+  row.appendChild(el('span', 'task-state' + (s.cls ? ' ' + s.cls : ''), s.text))
+  if (t.description) {
+    btnize(row, () => { row.classList.toggle('open'); row.setAttribute('aria-expanded', row.classList.contains('open') ? 'true' : 'false') })
+    row.setAttribute('aria-expanded', 'false')
+    row.setAttribute('aria-label', t.subject + '，点按' + (t.description ? '展开/收起任务描述' : '查看'))
+  }
+  return row
+}
+function renderTeamSheet() {
+  const root = teamSheetRoot && S.sessions.get(teamSheetRoot)
+  const body = $('#team-body')
+  if (!body) return
+  if (!root) return
+  const team = teamOf(root)
+  const st = teamStats(root)
+  const keepScroll = body.scrollTop
+  $('#team-title-count').textContent = st ? String(st.total) : ''
+  $('#team-sheet-sub').textContent = chatTitleOf(root)
+  body.textContent = ''
+  if (!team || !st) {
+    body.appendChild(el('div', 'kids-empty', '这个会话还没有团队。'))
+    return
+  }
+  const teammates = team.members.filter((m) => m.role === 'teammate')
+  // 关系图：Lead + 最多 3 名成员；更多成员在下方完整列表里
+  if (teammates.length) {
+    const map = el('div', 'roster-map')
+    const lead = el('div', 'rm-lead')
+    lead.appendChild(avNode('lead', 42, 'l'))
+    const leadMid = el('div', 'rm-lead-mid')
+    leadMid.appendChild(el('b', null, 'lead'))
+    leadMid.appendChild(el('small', null, 'Lead · ' + (root.running ? '运行中' : '空闲')))
+    lead.appendChild(leadMid)
+    map.appendChild(lead)
+    map.appendChild(el('div', 'rm-branch'))
+    const grid = el('div', 'rm-members')
+    const shown = teammates.slice(0, 3)
+    shown.forEach((m, i) => {
+      const cell = el('div', 'rm-m')
+      cell.appendChild(avNode(m.name, 26, teamTone(i + 1)))
+      cell.appendChild(el('span', null, m.name))
+      const dot = el('i', 'st-dot ' + (m.phase === 'provisioning' ? 'prov' : m.phase === 'failed' ? 'fail' : teamMemberRunning(root, m) ? 'run' : 'idle'))
+      cell.appendChild(dot)
+      grid.appendChild(cell)
+    })
+    if (teammates.length > shown.length) {
+      const more = el('div', 'rm-m rm-more')
+      more.appendChild(el('span', 'av-more', '+' + (teammates.length - shown.length)))
+      more.appendChild(el('span', null, '更多成员'))
+      grid.appendChild(more)
+    }
+    map.appendChild(grid)
+    body.appendChild(map)
+  }
+  // 成员
+  const memberSec = el('div', 'team-sec', '成员')
+  memberSec.appendChild(el('span', null, String(st.total)))
+  body.appendChild(memberSec)
+  body.appendChild(teamMemberRow(root, team.members[0], 0))
+  teammates.forEach((m, i) => body.appendChild(teamMemberRow(root, m, i + 1)))
+  // 任务板
+  const sec = el('div', 'team-sec', '任务板')
+  sec.appendChild(el('span', null, String(st.tasks.length)))
+  body.appendChild(sec)
+  const filters = el('div', 'task-filters')
+  const filterDefs = [
+    ['all', '全部', st.tasks.length],
+    ['in_progress', '进行中', st.active],
+    ['pending', '待领取', st.pending],
+    ['completed', '完成', st.completed],
+  ]
+  for (const [key, label, count] of filterDefs) {
+    const chip = el('button', 'chip' + (teamTaskFilter === key ? ' sel' : ''))
+    chip.type = 'button'
+    chip.appendChild(el('span', null, label + ' '))
+    chip.appendChild(el('b', null, String(count)))
+    chip.setAttribute('aria-pressed', teamTaskFilter === key ? 'true' : 'false')
+    chip.onclick = () => { teamTaskFilter = key; renderTeamSheet() }
+    filters.appendChild(chip)
+  }
+  body.appendChild(filters)
+  const list = el('div', 'task-list')
+  for (const t of st.tasks) {
+    const row = teamTaskRow(t)
+    if (teamTaskFilter !== 'all' && t.status !== teamTaskFilter) row.classList.add('filtered')
+    list.appendChild(row)
+  }
+  if (!st.tasks.length) list.appendChild(el('div', 'kids-empty', st.running ? '任务板还是空的，等 Agent 建任务。' : '任务板是空的。'))
+  body.appendChild(list)
+  // 写入范围重叠只做提示，不阻止执行（与桌面同语义）
+  const pairs = new Set()
+  for (const t of st.tasks) for (const w of t.writeScopeWarnings || []) {
+    const m = /overlap with (task-\d+)/.exec(String(w))
+    if (m) pairs.add([t.id, m[1]].sort().join('|'))
+  }
+  if (pairs.size) {
+    const warn = el('div', 'task-warning')
+    warn.appendChild(el('span', null, '!'))
+    const txt = el('div')
+    const shown = [...pairs].slice(0, 3)
+    for (const p of shown) {
+      const [a, b] = p.split('|')
+      txt.appendChild(el('div', null, a + ' 与 ' + b + ' 的写入范围重叠'))
+    }
+    if (pairs.size > shown.length) txt.appendChild(el('div', null, '还有 ' + (pairs.size - shown.length) + ' 组写入范围重叠'))
+    txt.appendChild(el('div', 'tw-note', '只是提示，不会阻止执行。'))
+    warn.appendChild(txt)
+    body.appendChild(warn)
+  }
+  if (team.failure) {
+    const warn = el('div', 'task-warning')
+    warn.appendChild(el('span', null, '!'))
+    warn.appendChild(el('div', null, '团队投影失败：' + team.failure))
+    body.appendChild(warn)
+  }
+  body.appendChild(el('p', 'team-note', '任务由团队 Agent 创建和更新。手机端保持只读——状态流转用 compare-and-set，不适合做成触屏表单。'))
+  body.scrollTop = keepScroll
+}
+function openKidsSheet(s) {
+  if (!s) return
+  kidsSheetSession = s.id
+  renderKidsSheet()
+  const kb = $('#kids-body'); if (kb) kb.scrollTop = 0
+  ovSet('kids-ov', true)
+  vibrate(8)
+  refreshSessionProjections(s)
+}
+function closeKidsSheet() {
+  kidsSheetSession = null
+  ovSet('kids-ov', false)
+}
+function childNameOf(parent, entry) {
+  const root = teamRootOf(parent) || parent
+  const team = teamOf(root)
+  const m = team && team.members.find((x) => x.id === entry.id)
+  if (m) return m.name
+  const child = S.sessions.get(entry.id)
+  return (child && child.agentLabel) || entry.label || (child && sessTitle(child)) || '子会话'
+}
+function childMetaOf(entry) {
+  const child = S.sessions.get(entry.id)
+  if (!child) return subagentModeLabel(entry.mode) + ' · 未加载'
+  const bits = [subagentModeLabel(subagentModeOf(child) || entry.mode), child.running ? '运行中' : '空闲']
+  const n = Array.isArray(child.agentCatalog) ? child.agentCatalog.length : 0
+  if (n) bits.push(n + ' 个下级')
+  return bits.join(' · ')
+}
+function renderKidsSheet() {
+  const s = kidsSheetSession && S.sessions.get(kidsSheetSession)
+  const body = $('#kids-body')
+  if (!body) return
+  if (!s) return
+  $('#kids-title').textContent = chatTitleOf(s) + ' 的子会话'
+  body.textContent = ''
+  const tree = el('div', 'kids-tree')
+  const current = el('div', 'kid-row current')
+  current.appendChild(el('span', 'tree-elbow'))
+  current.appendChild(avNode(chatTitleOf(s), 30, 'l'))
+  const cm = el('span', 'kid-mid')
+  cm.appendChild(el('b', null, chatTitleOf(s)))
+  cm.appendChild(el('small', null, subagentModeLabel(subagentModeOf(s)) + ' · 当前会话'))
+  current.appendChild(cm)
+  current.appendChild(el('span', 'mini-chip', '这里'))
+  tree.appendChild(current)
+  const cat = Array.isArray(s.agentCatalog) ? s.agentCatalog : []
+  for (const entry of cat) {
+    if (!entry || !entry.id) continue
+    const child = S.sessions.get(entry.id)
+    const external = entry.mode === 'external'
+    const row = external ? el('div', 'kid-row disabled') : el('button', 'kid-row')
+    if (!external) row.type = 'button'
+    row.appendChild(el('span', 'tree-elbow'))
+    row.appendChild(avNode(childNameOf(s, entry), 30, 'r'))
+    const mid = el('span', 'kid-mid')
+    mid.appendChild(el('b', null, childNameOf(s, entry)))
+    mid.appendChild(el('small', null, childMetaOf(entry)))
+    row.appendChild(mid)
+    row.appendChild(el('span', 'mini-chip', external ? '外部' : entry.mode === 'one-shot' ? '只读' : subagentModeLabel(entry.mode)))
+    if (!external) row.onclick = () => openChildChat(entry.id, s.id, entry.mode, entry.label)
+    tree.appendChild(row)
+  }
+  if (cat.length) body.appendChild(tree)
+  else body.appendChild(el('div', 'kids-empty', '这个会话没有下级子会话。'))
+  body.appendChild(el('p', 'team-note', '普通会话列表不铺开子代理会话；成员会话里用谱系按需展开。一次性子会话只能查看历史，不能继续输入。'))
+}
+function openChildChat(id, parentId, mode, label) {
+  if (!id) return
+  prepareChildSession(id, parentId, mode, label)
+  closeKidsSheet()
+  ovSet('team-ov', false)
+  vibrate(8)
+  if (S.current === id) return
+  location.hash = '#/s/' + id
+}
+/* 成员会话底部：直接下级子会话的迷你卡（完整谱系在谱系单里） */
+function subkidsCard(s) {
+  if (!s.subagent) return null
+  const cat = (Array.isArray(s.agentCatalog) ? s.agentCatalog : []).filter((e) => e && e.id && e.mode !== 'external')
+  if (!cat.length) return null
+  const card = el('div', 'subkids-card')
+  const head = el('div', 'subkids-head')
+  head.appendChild(el('span', null, chatTitleOf(s) + ' 的子会话'))
+  head.appendChild(el('span', 'mini-chip', String(cat.length)))
+  card.appendChild(head)
+  for (const entry of cat.slice(0, 3)) {
+    const row = el('button', 'subkid')
+    row.type = 'button'
+    const child = S.sessions.get(entry.id)
+    row.appendChild(el('span', 'subkid-av', avInitial(childNameOf(s, entry))))
+    const mid = el('span', 'subkid-mid')
+    mid.appendChild(el('b', null, childNameOf(s, entry)))
+    mid.appendChild(el('small', null, childMetaOf(entry)))
+    row.appendChild(mid)
+    row.appendChild(el('span', 'mini-chip', entry.mode === 'one-shot' ? '只读' : ''))
+    row.onclick = () => openChildChat(entry.id, s.id, entry.mode, entry.label)
+    card.appendChild(row)
+  }
+  if (cat.length > 3) {
+    const all = el('button', 'subkid')
+    all.type = 'button'
+    all.appendChild(el('span', 'subkid-av', '+' + (cat.length - 3)))
+    const mid = el('span', 'subkid-mid')
+    mid.appendChild(el('b', null, '查看全部 ' + cat.length + ' 个子会话'))
+    mid.appendChild(el('small', null, '按谱系展开'))
+    all.appendChild(mid)
+    all.appendChild(icon('chev', 12))
+    all.onclick = () => openKidsSheet(s)
+    card.appendChild(all)
+  }
+  return card
+}
+function goChatBack() {
+  const s = S.current ? S.sessions.get(S.current) : null
+  if (s && s.subagent && s.parentSessionId) location.hash = '#/s/' + s.parentSessionId
+  else location.hash = '#/'
 }
 /* 任务清单底部抽屉 */
 let taskSheetSession = null
@@ -2857,24 +3536,34 @@ async function loadBase() {
       const s = sess(item.sessionId)
       s.subagent = item.origin === 'subagent'
       if (item.parentSessionId) s.parentSessionId = item.parentSessionId  // 子代理 follow 需要父地址
-      if (s.subagent) continue
       const wasRunning = s.running
       s.updatedAt = item.updatedAt || 0
       s.asOfSeq = (item.projections && item.projections.asOfSeq) || 0
       s.running = !!item.running
-      // 后台跑完了 / 上一条还是提问文本：补拉尾部把预览换成回答（会话正开着的不用，fold 会实时换）
-      if (S.current !== item.sessionId && !s.running && s.asOfSeq > 0 && (wasRunning || prevDirtyGet().has(item.sessionId))) refreshPreview(s, s.asOfSeq)
       s.blank = !!item.blank
       s.cwd = item.cwd || ''
       s.agentPreset = item.agentPreset || null
+      s.agentAvailable = !!item.agentAvailable
+      // 子会话也吃投影：标题/运行状态给团队 member 行用，subagent 投影给模式兜底；
+      // 只是永远不进主列表（renderList 过滤 s.subagent）。
       applyListValues(s, item.projections && item.projections.values)
+      if (s.subagent) continue
+      // 后台跑完了 / 上一条还是提问文本：补拉尾部把预览换成回答（会话正开着的不用，fold 会实时换）
+      if (S.current !== item.sessionId && !s.running && s.asOfSeq > 0 && (wasRunning || prevDirtyGet().has(item.sessionId))) refreshPreview(s, s.asOfSeq)
     }
+    linkChildModes()
     // workspace/follow 已提供权威分组（含真实标题/顺序/归档）；仅在还没有时退回 cwd 推导
     if (!S.workspaces.length) deriveWorkspaces()
     seenBootstrap()   // 列表首次落地后：现有会话一次性全部记为已读（此后新完成的才标未读）
     S.listLoaded = true
     setConn('online')
     renderList()
+    // 冷启动直接开子会话/团队会话时，父目录与成员名可能比会话本身晚落地：补刷一次标题/谱系
+    const cur = S.current && S.sessions.get(S.current)
+    if (cur && (cur.subagent || hasTeamView(cur))) {
+      const t = $('#chat-title'); if (t && S.current === cur.id) t.textContent = chatTitleOf(cur)
+      refreshChatChrome(cur)
+    }
   } catch (e) {
     setConn('offline')
     toast('连接失败：' + e.message, true)
@@ -2882,8 +3571,13 @@ async function loadBase() {
 }
 /* 历史加载：打开（或重开）follow 流，等首帧 snapshot 折叠完成 */
 async function loadHistory(s) {
-  // 子代理会话且父地址未知：先刷一次列表拿 parentSessionId，否则 follow 必报 agent-busy
-  if (s.subagent && !s.parentSessionId) await loadBase().catch(() => {})
+  // 子代理会话且父地址/模式未知：先刷一次列表（父目录里带 mode），否则 follow 必报 agent-busy / mode mismatch
+  if (s.subagent && (!s.parentSessionId || !s.subagentMode)) await loadBase().catch(() => {})
+  if (s.subagent && !s.subagentMode && s.parentSessionId) {
+    // 缓存投影里的父目录可能没带 subagentCatalog：点对点读一次父会话投影，别把 one-shot 误当 continuable
+    const p = S.sessions.get(s.parentSessionId)
+    if (p && !p.agentCatalog) await refreshSessionProjections(p).catch(() => {})
+  }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { s._resolveLoad = null; s._rejectLoad = null; reject(new Error('加载超时')) }, 12000)
     s._resolveLoad = () => { clearTimeout(timer); seenMark(s.id, Math.max(s.asOfSeq || 0, ...(s.items || []).map((x) => x.seq || 0))); resolve() }   // 折叠完成＝这之前的都看过了
@@ -3278,11 +3972,12 @@ const Mux = {
     this.connect()
   },
 }
-/* follow 地址：子代理会话必须用父地址，否则宿主报 agent-busy（修「点进去什么都看不见」） */
+/* follow 地址：子代理会话必须用父地址，否则宿主报 agent-busy（修「点进去什么都看不见」）。
+ * mode 也必须是子会话的真实模式：一次性子会话用 continuable 地址会被宿主判 unauthorized。 */
 function followAddress(id) {
   const s = S.sessions.get(id)
   if (s && s.subagent && s.parentSessionId) {
-    return { kind: 'subagent', parentSessionId: s.parentSessionId, childSessionId: id, mode: 'continuable' }
+    return { kind: 'subagent', parentSessionId: s.parentSessionId, childSessionId: id, mode: subagentModeOf(s) || 'continuable' }
   }
   return { kind: 'session', sessionId: id }
 }
@@ -3293,7 +3988,7 @@ function applyProjection(s, values) {
     if (s._titleAt && Date.now() - s._titleAt < 5000) return   // 刚改过名：挡在途旧投影帧（新值已本地在位）
     s.title = values.title
     renderListSoon()
-    if (S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = sessTitle(s) }
+    if (S.current === s.id) { const t = $('#chat-title'); if (t) t.textContent = chatTitleOf(s) }
   }
   if (values.permissions && (typeof values.permissions.currentValue === 'string' || Array.isArray(values.permissions.options))) {
     s.permissions = { ...(s.permissions || {}), ...values.permissions }
@@ -3307,6 +4002,9 @@ function applyProjection(s, values) {
   if (values.imageLimits) s.imageLimits = values.imageLimits
   if ('todos' in values) setTodos(s, values.todos)
   if ('inbox' in values) applyInboxQueue(s, values.inbox)
+  if ('agentTeam' in values) applyTeam(s, values.agentTeam)
+  if ('subagentCatalog' in values) applyCatalog(s, values.subagentCatalog)
+  if ('subagent' in values) applyChildIdentity(s, values.subagent)
   applyStats(s, values)
 }
 /* ---- workspace 流：归档集合 + 真实工作区分组（修「归档后列表不消失」） ---- */
@@ -3379,6 +4077,7 @@ Mux.handlers.events = (v) => {
         const s = sess(sum.sessionId)
         s.subagent = false
         s.blank = !!sum.blank; s.cwd = sum.cwd || ''; s.agentPreset = sum.agentPreset || null
+        s.agentAvailable = !!sum.agentAvailable
         s.updatedAt = sum.updatedAt || Date.now()
         s.asOfSeq = (sum.projections && sum.projections.asOfSeq) || s.asOfSeq || 0   // 未读判断要用
         if (sum.projections && sum.projections.values) applyListValues(s, sum.projections.values)
@@ -3403,9 +4102,14 @@ Mux.handlers.events = (v) => {
         const s = sess(a[0])
         const wasRunning = s.running
         s.running = !!a[1]
+        if (s.running) s.agentAvailable = true   // running 必然持有活 Agent
         if (S.current === s.id) refreshChatChrome(s)
+        // 成员跑没跑起来要反映在 Lead 的团队条/团队面板上（子会话状态不会冒泡成父会话事件）
+        const root = teamRootOf(s)
+        if (S.current && root && S.current === root.id) { renderTeamBand(root); if (teamSheetRoot === root.id) renderTeamSheet() }
+        else if (teamSheetRoot && root && teamSheetRoot === root.id) renderTeamSheet()
         // 后台跑完了：列表预览还停在提问文本上——立即补拉尾部换成回答（asOfSeq 可能滞后，不带上限）
-        if (wasRunning && !s.running && S.current !== s.id) refreshPreview(s, 0)
+        if (wasRunning && !s.running && S.current !== s.id && !s.subagent) refreshPreview(s, 0)
         renderListSoon()
         break
       }
@@ -3574,7 +4278,7 @@ async function openSession(id, force) {
   S.current = id
   S.todoMode = false
 
-  $('#chat-title').textContent = sessTitle(s)
+  $('#chat-title').textContent = chatTitleOf(s)
   showView('chat')
   s._newBelow = false
   closeQDrawer()
@@ -3619,7 +4323,7 @@ function refreshChatChrome(s) {
     input.classList.toggle('off', off)
   }
   const send = $('#send-btn')
-  if (send) send.disabled = off
+  if (send) send.disabled = off || !!subagentReadonly(s)
   // 运行状态上移标题栏：副标题「● 正在工作中」+ ⏹ 停止钮（仅运行时），输入框上不再有易误触的运行条
   const sub = $('#chat-sub')
   if (sub) {
@@ -3640,6 +4344,9 @@ function refreshChatChrome(s) {
       sub.appendChild(stop)
       refreshRunDur(s)
       ensureRunDurTimer()
+    } else if (s.subagent) {
+      const parent = s.parentSessionId ? (S.sessions.get(s.parentSessionId) || sess(s.parentSessionId)) : null
+      sub.textContent = (parent ? chatTitleOf(parent) : '上级会话') + ' · 成员子会话'
     } else sub.textContent = s.cwd || ''
   }
   updateCtxBar(s)
@@ -3648,10 +4355,13 @@ function refreshChatChrome(s) {
   renderOfflineStrip()
   renderQuoteStrip()
   renderQueueStrip(s)
+  renderTeamBand(s)
+  renderLineage(s)
+  renderReadonlyComposer(s)
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
   if (input2 && !off) {
-    input2.dataset.ph = s.running ? (busyEnter() === 'steer' ? '插话发送…（长按排队）' : '将排队发送…（长按插话）') : '发消息…'
+    input2.dataset.ph = subagentReadonly(s) ? '只读会话' : s.running ? (busyEnter() === 'steer' ? '插话发送…（长按排队）' : '将排队发送…（长按插话）') : '发消息…'
   }
 }
 /* ---- 上下文压力条（标题栏底边 2px） ---- */
@@ -4115,7 +4825,11 @@ function renderQueueStrip(s) {
     const tag = el('span', 'q-tag', q.placement === 'steering' ? '插话' : '排队 #' + qi)
     const tx = el('span', 'q-text', label)
     chip.append(dot, tag, tx)
-    onTap(chip, () => openQSheet(s, q))  // 排队 chip 也在输入区：同樣走 touchend 派发
+    onTap(chip, () => {
+      // 子会话的 inbox 没有暴露 edit/steer/remove 的宿主接口：只显示“还在排队”，不弹出会失败的操作单
+      if (s.subagent) { toast('这条消息正在排队，子会话里不能修改；等它被领取即可', true); return }
+      openQSheet(s, q)
+    })  // 排队 chip 也在输入区：同樣走 touchend 派发
     strip.appendChild(chip)
   }
 }
@@ -4726,7 +5440,12 @@ function initSwipeBack() {
       setTimeout(() => {
         v.classList.remove('active')
         v.style.transform = ''
-        if (S.current) { S.current = null; location.hash = '#/'; renderList() }
+        if (S.current) {
+          const s = S.sessions.get(S.current)
+          const parent = s && s.subagent && s.parentSessionId ? s.parentSessionId : null
+          if (parent) location.hash = '#/s/' + parent
+          else { S.current = null; location.hash = '#/'; renderList() }
+        }
       }, 240)
     } else {
       v.style.transform = ''
@@ -4761,6 +5480,39 @@ function initSheetDrag() {
     const shouldClose = dy > 110
     sheet.style.transform = ''
     if (shouldClose) closeSheet()
+    dy = 0
+  }
+  sheet.addEventListener('touchend', finish)
+  sheet.addEventListener('touchcancel', finish)
+}
+/* 通用底部单：背景点按关闭 + 下拽关闭（团队面板 / 子会话谱系） */
+function initSheetDismiss(ovId, bodyId, close) {
+  const ov = document.getElementById(ovId)
+  if (!ov) return
+  const sheet = ov.querySelector('.sheet')
+  const body = document.getElementById(bodyId)
+  ov.addEventListener('click', (e) => { if (e.target === ov) close() })
+  let dragging = false, startY = 0, dy = 0
+  sheet.addEventListener('touchstart', (e) => {
+    if (e.target.closest('.sheet-x')) return
+    if (!body || body.scrollTop <= 0 || e.target.closest('.grabber') || e.target.closest('.team-sheet-head')) { dragging = true; startY = e.touches[0].clientY; dy = 0 }
+  }, { passive: true })
+  sheet.addEventListener('touchmove', (e) => {
+    if (!dragging) return
+    dy = Math.max(0, e.touches[0].clientY - startY)
+    if (dy > 0 && (!body || body.scrollTop <= 0)) {
+      sheet.classList.add('dragging')
+      sheet.style.transform = 'translateY(' + dy + 'px)'
+      if (e.cancelable) e.preventDefault()
+    }
+  }, { passive: false })
+  const finish = () => {
+    if (!dragging) return
+    dragging = false
+    sheet.classList.remove('dragging')
+    const shouldClose = dy > 110
+    sheet.style.transform = ''
+    if (shouldClose) close()
     dy = 0
   }
   sheet.addEventListener('touchend', finish)
@@ -5009,6 +5761,8 @@ async function startSession() {
  * 换新 id 等于放弃去重：首次其实已被受理、只是回包迟到时，重试会让同一条指令真的执行两遍 */
 async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   const s = sess(id)
+  const ro = subagentReadonly(s)
+  if (ro) { toast(ro.title + '：' + ro.body, true); return }
   const rpcId = reuseRpcId || uuid()
   const item = { kind: 'user', text: text || '', images: images && images.length ? images : null, time: Date.now(), pending: true, failed: false, rpcId }
   s.items.push(item)
@@ -5028,13 +5782,25 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
     const mode = (!s.running) ? 'queue' : (forceMode || busyEnter())
     let finalMode = mode
     try {
-      await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode, content, clientTimeZone: tz() } })
+      if (s.subagent) {
+        // 成员子会话走父地址的 subagent 投递；continuable 模式才能继续输入
+        if (!s.parentSessionId) throw new Error('缺少父会话地址，请返回上级会话再试')
+        await rpc('subagents/prompt', { request: { requestId: rpcId, parentSessionId: s.parentSessionId, childSessionId: id, mode: 'continuable', delivery: mode, content, clientTimeZone: tz() } })
+      } else {
+        await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode, content, clientTimeZone: tz() } })
+      }
     } catch (e) {
       if (mode === 'steer' && e.message && /steer/i.test(e.message)) {
         finalMode = 'queue'
-        await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+        if (s.subagent) {
+          await rpc('subagents/prompt', { request: { requestId: rpcId, parentSessionId: s.parentSessionId, childSessionId: id, mode: 'continuable', delivery: 'queue', content, clientTimeZone: tz() } })
+        } else {
+          await rpc('session/prompt', { request: { requestId: rpcId, sessionId: id, mode: 'queue', content, clientTimeZone: tz() } })
+        }
       } else throw e
     }
+    s.agentAvailable = true   // RPC 受理即该会话持有活 Agent（上级可用性也是成员输入的前提）
+    if (s.subagent && s.parentSessionId) { const ps = S.sessions.get(s.parentSessionId); if (ps) ps.agentAvailable = true }
     // RPC 已受理 → 传输完成。分两种呈现：
     //  - 真正排队（本轮还在跑）：消息还没进对话流，撤下乐观气泡，交给输入框上方的排队 chip。
     //    重进会话后宿主快照本来就是这个形态（快照不含未消费的排队消息），此前实时路径与之
@@ -5053,7 +5819,11 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
     item.pending = false; item.failed = true
     if (S.current === id) renderChat(s)
     const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError')
-    toast(isTimeout ? '网络超时，未送达 — 点气泡上的重试' : '发送失败：' + e.message, true)
+    const em = String((e && e.message) || '')
+    const subagentHint = s.subagent && /parent.*not live|parent-unavailable/i.test(em)
+      ? '上级会话未在线：先在上级会话发一条消息，再回来继续。'
+      : s.subagent && /delivery-unavailable/i.test(em) ? '上级会话暂时不能恢复这个子会话，稍后再试。' : null
+    toast(isTimeout ? '网络超时，未送达 — 点气泡上的重试' : subagentHint || '发送失败：' + em, true)
   }
 }
 function retrySend(s, item) {
@@ -5062,7 +5832,18 @@ function retrySend(s, item) {
   sendPrompt(s.id, item.text, item.images, null, item.rpcId)  // 沿用原 id：宿主幂等去重，避免双发
 }
 async function cancelSession(id) {
-  try { await rpc('session/cancel', { request: { sessionId: id } }); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
+  const s = S.sessions.get(id)
+  try {
+    if (s && s.subagent) {
+      // 子会话停止走父地址授权；一次性子会话没有可停的轮
+      if (subagentReadonly(s)) { toast('只读会话没有可停止的任务', true); return }
+      if (!s.parentSessionId) throw new Error('缺少父会话地址')
+      await rpc('subagents/interruptByParent', { childSessionId: id, parentSessionId: s.parentSessionId, mode: 'continuable' })
+    } else {
+      await rpc('session/cancel', { request: { sessionId: id } })
+    }
+    toast('已发送停止 ■')
+  } catch (e) { toast(e.message, true) }
 }
 
 /* ================= 会话设置面板（模型 / 权限） ================= */
@@ -5233,7 +6014,7 @@ function renderSheet(s) {
 
   // ---- 会话身份卡：标题 + 两个可复制的技术字符串 ----
   const info = el('div', 'ms-info')
-  info.appendChild(el('div', 'ms-info-title', sessTitle(s)))
+  info.appendChild(el('div', 'ms-info-title', chatTitleOf(s)))
   const infoRow = (label, value, emptyText) => {
     const txt = el('div', 'ms-info-txt')
     txt.appendChild(el('div', 'ms-info-label', label))
@@ -5290,15 +6071,24 @@ function renderSheet(s) {
     return r
   }
 
-  // ---- 对话：模型 / 权限 / 运行中发送 / 自动朗读 ----
+  // ---- 对话：团队（有才出现）/ 模型 / 权限 / 运行中发送 / 自动朗读 ----
   const talk = group('对话')
-  menuRow(talk, { icon: 'brain', name: '模型', value: modelLabel(s), onClick: () => openModelPanel(s) })
-  const perms = s.permissions
-  const permName = () => {
-    if (!perms) return '加载中…'
-    return permLabel(perms.currentValue)
+  {
+    const teamRoot = teamRootOf(s)
+    const teamSt = teamRoot ? teamStats(teamRoot) : null
+    if (teamSt && hasTeamView(teamRoot)) {
+      menuRow(talk, { icon: 'team', name: '团队', value: teamSt.total + ' 名成员 · ' + teamSt.running + ' 运行中', onClick: () => { closeSheet(); openTeamSheet(s) } })
+    }
   }
-  menuRow(talk, { icon: 'lock', name: '权限', value: permName(), onClick: () => openPermPanel(s) })
+  if (!s.subagent) {
+    menuRow(talk, { icon: 'brain', name: '模型', value: modelLabel(s), onClick: () => openModelPanel(s) })
+    const perms = s.permissions
+    const permName = () => {
+      if (!perms) return '加载中…'
+      return permLabel(perms.currentValue)
+    }
+    menuRow(talk, { icon: 'lock', name: '权限', value: permName(), onClick: () => openPermPanel(s) })
+  }
   menuRow(talk, { icon: 'bolt', name: '运行中发送', value: busyEnter() === 'queue' ? '排队' : '插话', onClick: () => openSendPanel(s) })
   {
     const sw = el('span', 'tg-sw' + (ttsAuto() ? ' on' : ''))
@@ -5345,7 +6135,11 @@ function renderSheet(s) {
     },
   })
 
-  // ---- 管理：重命名 / 分叉 / 归档 ----
+  // ---- 管理：重命名 / 分叉 / 归档（成员子会话由上级管理，不在这里给会失败的操作） ----
+  if (s.subagent) {
+    c.appendChild(el('div', 'ms-group-label', '管理'))
+    c.appendChild(el('div', 'sheet-note', '成员子会话的模型 / 权限 / 重命名 / 归档由上级会话管理。'))
+  } else {
   const manage = group('管理')
   const t = s.title || ''
   menuRow(manage, { icon: 'pencil', name: '重命名', value: t.length > 14 ? t.slice(0, 14) + '…' : (t || '未命名'), onClick: () => openRenamePanel(s) })
@@ -5385,7 +6179,8 @@ function renderSheet(s) {
       } catch (e) { toast('归档失败：' + e.message, true) }
     },
   })
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.17.0'))
+  }
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.0'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -6118,6 +6913,7 @@ function sessionText(s) {
   const lines = []
   for (const it of s.items) {
     if (it.kind === 'user') lines.push('我：' + it.text)
+    else if (it.kind === 'peer') lines.push('[队友 ' + it.senderName + '] ' + it.text)
     else if (it.kind === 'assistant') lines.push(it.text)
     else if (it.kind === 'tool') lines.push('[工具 ' + it.name + '] ' + toolSummary(it))
     else if (it.kind === 'sys') lines.push(it.text)
@@ -6256,6 +7052,18 @@ function buildShell() {
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
       <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>
+    <button class="team-band" id="team-band" type="button" aria-label="打开团队面板" style="display:none"></button>
+    <div class="lineage" id="chat-lineage" style="display:none">
+      <div class="lineage-crumbs">
+        <button class="lin-parent" id="lineage-parent" type="button"></button>
+        <span class="lin-sep" aria-hidden="true">›</span>
+        <b id="lineage-name"></b>
+      </div>
+      <div class="lineage-meta">
+        <span class="mode-chip" id="lineage-mode"></span>
+        <button class="kids-btn" id="kids-btn" type="button" style="display:none"></button>
+      </div>
+    </div>
     <div class="task-bar" id="task-bar" role="button" tabindex="0" aria-label="任务清单" style="display:none">
       <span class="tb-ic" id="tb-ic"></span>
       <span class="tb-cur" id="tb-cur"></span>
@@ -6279,6 +7087,9 @@ function buildShell() {
       <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="quote-strip" id="quote-strip"></div>
+      <div class="ro-composer" id="ro-composer" style="display:none">
+        <b id="ro-title"></b><span id="ro-body"></span>
+      </div>
       <div class="composer">
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
         <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
@@ -6392,6 +7203,34 @@ function buildShell() {
       <button class="q-save" id="sess-rename-save" type="button">保存标题</button>
     </div>
   </div>
+  <div class="sheet-overlay" id="team-ov" aria-hidden="true">
+    <div class="sheet team-sheet" role="dialog" aria-modal="true" aria-label="团队面板">
+      <div class="grabber"></div>
+      <div class="team-sheet-head">
+        <div>
+          <div class="sheet-kicker">Agent Team</div>
+          <div class="team-sheet-title">团队 <span id="team-title-count"></span></div>
+          <div class="team-sheet-sub" id="team-sheet-sub"></div>
+        </div>
+        <button class="sheet-x" id="team-close" type="button" aria-label="关闭团队面板">✕</button>
+      </div>
+      <div class="sheet-scroll team-sheet-scroll" id="team-body"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="kids-ov" aria-hidden="true">
+    <div class="sheet kids-sheet" role="dialog" aria-modal="true" aria-label="子会话谱系">
+      <div class="grabber"></div>
+      <div class="team-sheet-head">
+        <div>
+          <div class="sheet-kicker">Sub-sessions</div>
+          <div class="team-sheet-title" id="kids-title">子会话</div>
+          <div class="team-sheet-sub">按会话谱系展开；目录按需读取</div>
+        </div>
+        <button class="sheet-x" id="kids-close" type="button" aria-label="关闭子会话谱系">✕</button>
+      </div>
+      <div class="sheet-scroll" id="kids-body"></div>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
@@ -6420,7 +7259,7 @@ function buildShell() {
       renderList()
     }
   })
-  $('#chat-back').onclick = () => { location.hash = '#/' }
+  $('#chat-back').onclick = goChatBack
   $('#chat-more').onclick = () => { if (S.current) openSheet(sess(S.current)) }
   $('#q-handle').onclick = () => openQDrawer()
   $('#qd-close').onclick = () => closeQDrawer()
@@ -6434,6 +7273,11 @@ function buildShell() {
   initPtr($('#list-scroll'))
   initSwipeBack()
   initSheetDrag()
+  // 团队面板 / 子会话谱系：✕、背景点按、下拽都能关
+  $('#team-close').onclick = closeTeamSheet
+  $('#kids-close').onclick = closeKidsSheet
+  initSheetDismiss('team-ov', 'team-body', closeTeamSheet)
+  initSheetDismiss('kids-ov', 'kids-body', closeKidsSheet)
   // 思考抽屉：背景/✕ 关闭 + 下拽关闭（与 ⋯ 面板同手势语言）
   $('#think-overlay').addEventListener('click', (e) => { if (e.target.id === 'think-overlay') closeThink() })
   $('#think-close').onclick = closeThink
@@ -6796,7 +7640,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
@@ -6809,5 +7653,5 @@ document.addEventListener('keydown', (e) => {
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
-try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom } } catch (e) {}
+try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat } } catch (e) {}
 })()
