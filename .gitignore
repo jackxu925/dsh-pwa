@@ -5,3 +5,5 @@ prototype/
 verify/
 *.bak
 prototype-*.png
+# npm auth token (local login)
+tmp-user.npmrc
