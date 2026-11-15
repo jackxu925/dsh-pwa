@@ -4293,6 +4293,12 @@ const draftKey = (id) => 'dshm-draft:' + id
 function restoreDraft(id) {
   const input = $('#chat-input')
   if (!input) return
+  // 打开会话的尾部可能比用户点发送更晚：刚发过这条会话时不要把（可能由输入法回声写回的）
+  // 草稿再恢复进输入框；换到别的会话仍正常恢复它自己的草稿。
+  if (S._sentAt && S._sentAt.id === id && Date.now() - S._sentAt.at < 1200) {
+    input.textContent = ''
+    return
+  }
   try { input.textContent = localStorage.getItem(draftKey(id)) || '' } catch (e) { input.textContent = '' }
 }
 function clearDraft(id) { try { localStorage.removeItem(draftKey(id)) } catch (e) {} }
@@ -6236,7 +6242,7 @@ function renderSheet(s) {
     },
   })
   }
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.1'))
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.2'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -7509,6 +7515,17 @@ function buildShell() {
     await addImageFiles(files)
   })
   const input = $('#chat-input')
+  // 发送后的“回声”抑制：iOS 中文输入法在 composition 提交时可能把刚发出的文字重新写回
+  // contenteditable（textContent='' 下仍会被提交覆盖）。记住刚发出的原文，短窗内再出现
+  // 同样的字符串就视为回声，再清一次；用户开始输入下一条（文本不同）则立即放行。
+  let justSent = null
+  const isSentEcho = (t) => {
+    if (!justSent || S.current !== justSent.id || Date.now() > justSent.until || t !== justSent.text) return false
+    input.innerHTML = ''
+    if (input.textContent) input.textContent = ''
+    if (S.current) clearDraft(S.current)
+    return true
+  }
   // 粘贴：优先剪贴板图片（截图直接粘贴），否则只粘贴纯文本避免富文本污染
   input.addEventListener('paste', (e) => {
     const cd = e.clipboardData || window.clipboardData
@@ -7521,8 +7538,10 @@ function buildShell() {
   // 输入草稿：按会话持久化
   input.addEventListener('input', () => {
     if (!S.current) return
+    const t = input.textContent
+    if (isSentEcho(t)) return
+    if (justSent && Date.now() < justSent.until) justSent = null   // 用户已经开始写新内容：放开抑制
     try {
-      const t = input.textContent
       if (t && t.trim()) localStorage.setItem(draftKey(S.current), t)
       else localStorage.removeItem(draftKey(S.current))
     } catch (e) {}
@@ -7536,7 +7555,8 @@ function buildShell() {
     }
   })
   const doSend = async (forceMode) => {
-    let text = input.textContent.trim()
+    const rawInput = input.textContent.trim()
+    let text = rawInput
     // 有引用：拼成「引用块 + 【注】 + 正文」的纯文本（协议只有 text，这就是模型实际收到的）
     if (S.current && quotesOf(S.current).length) {
       text = composeQuoted(quotesOf(S.current), text)
@@ -7548,8 +7568,17 @@ function buildShell() {
     const images = pendingImages
     pendingImages = []
     renderStrip()
+    // 先记下原文再清空：输入法可能在清空后把提交的文字写回来（iOS WebKit），
+    // 下一帧/短延时里只要内容与原文相同就再清一次；不碰用户紧接着输入的新内容。
+    justSent = rawInput ? { id: S.current, text: rawInput, until: Date.now() + 1500 } : null
+    S._sentAt = { id: S.current, at: Date.now() }
+    input.innerHTML = ''
     input.textContent = ''
     clearDraft(S.current)
+    const wipeEcho = () => { if (isSentEcho(input.textContent)) return }
+    requestAnimationFrame(wipeEcho)
+    setTimeout(wipeEcho, 0)
+    setTimeout(wipeEcho, 120)
     vibrate(8)
     sendPrompt(S.current, text, images, forceMode)  // 乐观上屏，失败在气泡上重试
   }

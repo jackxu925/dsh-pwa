@@ -33,7 +33,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 👥 **Agent Teams & sub-sessions**: a team signal on the Lead's session card, an in-chat team band that opens a read-only roster + task board (with write-scope overlap hints), and member child sessions with lineage, real mode chips (continuable / one-shot) and teammate relay bubbles — no new home tab; one-shot children and continuable children whose direct parent is offline stay read-only
 - 🗂 **Session info menu**: the ⋯ sheet shows the session title, Session ID and working path (tap either to copy), with settings grouped into chat / content / manage sections
 - 🔎 **Global search**: local title/path filtering plus full-text message search (`session/search`) with highlighted snippets that jump straight to the session
-- 💬 **Streaming chat**: optimistic send, per-day dividers, timestamps, code-copy buttons, full-screen image viewer; dual send modes — queue while running, long-press to steer — and queued messages can be edited / steered / removed
+- 💬 **Streaming chat**: optimistic send, per-day dividers, timestamps, code-copy buttons, full-screen image viewer; dual send modes — queue while running, long-press to steer — and queued messages can be edited / steered / removed; the composer clears on send, even when an IME commit echoes the text back
 - ✅ Approvals & ❓ agent questions as tappable cards (dangerous commands get a red double-confirm)
 - 📦 **Deliverables & workspace files**: files the agent `present`s become timeline cards (inline image and video preview, direct text read) with share/AirDrop and open-on-Mac actions; the ⋯ menu browses the whole session workspace with per-turn change hints
 - ⏰ **Reminder center**: a third home tab lists every reminder your agents created — humanized schedules, next-fire countdowns, delivery history; delete in place or jump back to the origin session to reschedule
@@ -46,7 +46,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 📳 Haptics, dark/light themes, draft autosave per session, connection-status pill with manual reconnect
 - ⚙️ Desktop GUI gets a *Settings → 手机端* entry showing the phone URL + copy button (no typing URLs on a phone keyboard)
 
-The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 153 items, all fixed, each with the root cause.
+The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 154 items, all fixed, each with the root cause.
 
 ## Quick start
 

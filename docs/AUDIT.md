@@ -206,6 +206,8 @@
 
 | 153 | 用户反馈（真机，附截图）：从搜索/深链打开一个 sub-agent 子会话时，底部出现「上级会话未在线」的提示，看起来像报错；而且不确定 sub-agent 和 Agent 团队是什么关系 | 根因有三层：① 冷启动/深链打开子会话时 `session/list` 还没落地，`s.subagent`/`parentSessionId` 未知，follow 用普通 session 地址会被宿主以 `agent-busy` 拒绝，页面显示「加载失败」；② 打开子会话时不重新读 list，parent 的 `agentAvailable` 可能还是打开 parent 之前的旧快照，把在线的上级误判成离线；③ 普通会话派生的子会话在 PWA 里没有入口（只有团队成员子会话能从团队面板进），用户只能从搜索/深链撞进来，看到只读占位也不知道下一步。修：① 打开会话前等 `session/list` 落地；follow 报 subagent/agent-busy 时补 list 后按真实父地址重试一次，mode mismatch 时重读父投影重试；② 子会话打开后补一次最新 `session/list` 只刷新 `agentAvailable`，上级真在线就直接给输入框；③ ⋯ 菜单在任意有 `subagentCatalog` 的会话上加「子会话 N 个」入口（团队 Lead 已由团队面板覆盖时仅在还有非队友子会话时补），打开谱系单；④ 只读占位改名为「子会话需要上级在线」，正文明确「这是 sub-agent 子会话（不是 Agent 团队）」，并加「打开上级会话」按钮；一次性子会话同样说明概念；谱系单当前行不再误写成「子会话 · 当前会话」。实测（真实 parent `session-d12c23b1` → 子会话 `ad4c33fe`，390×844 深色）：菜单出现「子会话 1 个」，谱系单当前行「上级会话 · 当前会话」+ 1 个子会话；打开子会话得到说明 + 按钮，点回上级成功；团队 Lead 菜单仍有「团队」，且不与「子会话」重复；零 pageerror / console error | ✅ |
 
+| 154 | 用户反馈（真机）：打完字并发送后，消息已经上屏，但输入框里还残留着刚发出的同一段文字 | 根因两层：① iOS WebKit 的中文输入法在发送时仍有 composition，`textContent = ''` 后 `compositionend` 可能把刚提交的字符串写回 contenteditable，表现为消息已上屏、输入框原样残留；② 打开会话是异步的，若用户在 `openSession` 收尾前就发送，末尾的 `restoreDraft()` 可能把刚发出的草稿再灌回输入框。修：发送前记下原文，清空时同时清 `innerHTML`/`textContent`，并在下一帧、0ms、120ms 各兜底一次；`input` 事件在发送后 1.5 秒窗口内若看到与原文完全相同的字符串，视为输入法回声，再清一次并清草稿；用户开始输入不同内容立即放开抑制，不会误删下一条。另记录 `S._sentAt`，同会话 1.2 秒内的延迟 `restoreDraft` 不再回填。实测（真实宿主会话 + 拦截 prompt 避免写入用户数据，390×844 深色）：普通发送后输入框为空；IME composition 中发送后为空；模拟 composition 回声后为空；发送后立即输入下一条「下一条不应被清」保留；零 pageerror / console error。iOS 真机输入法回声仍需用户确认；对照证据见 `docs/evidence/composer-echo-2026-11/` | ✅ |
+
 ## 仍需协议/服务端配合（本轮未动）
 
 - 列表接口携带稳定可用的末条消息预览与未读计数：当前热会话用 `turnOutline` 投影做零请求预览；无 projection 的冷会话仍回退工作区名，未读只有点、没有计数。
