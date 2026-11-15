@@ -29,7 +29,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 
 ## Features
 
-- 🎙 **Voice mode (walkie-talkie)**: switch with the Text | Voice control in the chat header — hold to talk, release to send, swipe up to cancel, hold to barge in while it speaks; speech goes through DeepSeek ASR, replies are rewritten into a spoken script and voiced with DeepSeek TTS (rate changes keep the timbre), with a soft `thinking` cue during long turns, a 2-minute cap, and retry-without-losing-audio on ASR failure.
+- 🎙 **Voice mode (walkie-talkie)**: switch with the Text | Voice control in the chat header — hold to talk, release to send, swipe up to cancel, hold to barge in, tap to pause. Replies are rewritten into a spoken script by the harness LLM, then every paragraph is synthesized in parallel and played gaplessly with DeepSeek TTS (rate changes keep the timbre). **Full-screen state colors** replace spoken status chatter: recording red / transcribing purple / thinking amber / speaking blue. The capture pipeline fights wind noise (100 Hz high-pass + automatic level normalization), a visible 2-minute cap auto-sends, and an ASR failure keeps the audio — tap to retry.
 - 📋 **Session list** with last-message previews, unread dots, day grouping, workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and rename / fork / archive
 - 👥 **Agent Teams & sub-sessions**: a team signal on the Lead's session card, an in-chat team band that opens a read-only roster + task board (with write-scope overlap hints), and member child sessions with lineage, real mode chips (continuable / one-shot) and teammate relay bubbles — no new home tab; one-shot children and continuable children whose direct parent is offline stay read-only
 - 🗂 **Session info menu**: the ⋯ sheet shows the session title, Session ID and working path (tap either to copy), with settings grouped into chat / content / manage sections
@@ -47,7 +47,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 📳 Haptics, dark/light themes, draft autosave per session, connection-status pill with manual reconnect
 - ⚙️ Desktop GUI gets a *Settings → 手机端* entry showing the phone URL + copy button (no typing URLs on a phone keyboard)
 
-The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 154 items, all fixed, each with the root cause.
+The full UX audit trail lives in [docs/AUDIT.md](docs/AUDIT.md) — 155 items, all fixed, each with the root cause.
 
 ## Quick start
 
@@ -88,6 +88,8 @@ dsh --profile web --host 0.0.0.0 --port 3080 --trusted-host <your-access-domain>
 
 Upgrade later with `npm update dsh-pwa` and a `dsh web` restart. The plugin mounts the static surface plus one authenticated streaming route for large deliverable files; the page speaks DSH's own `/api`, so it moves with your DSH version (developer-preview caveat in the FAQ below).
 
+> **Voice mode prerequisite**: speech recognition and synthesis use DeepSeek's `tools/asr` / `tools/tts`. The host resolves `DEEPSEEK_API_KEY` from the environment or the DSH credential store (`~/.dsh/.credentials.yaml`) — set it once and the `/api/pwa.asr|tts` routes authenticate for you; nothing to configure on the phone. The spoken-script rewrite uses whichever model your harness routes the task to.
+
 > **Enabling global search**: the shipped web bundle keeps the full-text index off; set `session-query-sqlite` → `openAt: first-search` in your profile patch. Note: the 0.2.1-rc.x indexer requires a write-free persistence window while building, which conflicts with resident bots (ds-bot heartbeats every 20–40 s) — pick one until upstream relaxes the quiescence check.
 
 ## How it works
@@ -103,6 +105,10 @@ Iterating on the UI needs no restart: files are re-read per request, just refres
 | Sessions | Chat |
 |---|---|
 | ![session list](assets/screenshot-sessions.png) | ![chat](assets/screenshot-chat.png) |
+
+| Voice mode: Text \| Voice switch + hold-to-talk | State colors: record / transcribe / think / speak |
+|---|---|
+| ![voice mode switch](assets/screenshot-voice-switch.png) | ![voice state colors](assets/screenshot-voice-states.png) |
 
 ## Roadmap
 
