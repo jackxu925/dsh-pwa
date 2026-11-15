@@ -699,8 +699,12 @@ function stepTiming(st, event, d) {
   }
 }
 
-function foldEvent(s, event, view) {
+/* opts.historical：历史快照/翻页回放，不是刚刚发生的实时事件。
+ * foldEvent 里有副作用（turn/end 自动播报/自动朗读），回放历史时绝不能触发——
+ * 否则重连时 follow 快照会把上一条回复从头重播一遍（语音模式表现为「第二段还是上一段的声音」）。 */
+function foldEvent(s, event, view, opts) {
   const t = event.type, d = event.data || {}
+  const historical = !!(opts && opts.historical)
   // 最近一次事件时间（宿主时间轴）+ 收到它的本地时刻：实时 pill 靠这对值把本地时钟换算回宿主时钟
   s._lastEventAt = event.time
   s._lastEventSeenAt = Date.now()
@@ -863,6 +867,7 @@ function foldEvent(s, event, view) {
     }
     case 'turn/start':
       s.running = true; s._curTurn = d.turn; s._turnStartAt = event.time
+      if (!historical) voiceCancelScheduledSpeak()   // 新的一轮已开始：上一条回复的「稍后播报」作废，别打断用户刚发的消息
       s._step = null
       s._turnTiming = { llmMs: 0, ttftMs: null, ttftStep: null, decodeMs: 0, decodeTokens: 0, hasDecode: false }
       s._turnUsage = null
@@ -871,11 +876,12 @@ function foldEvent(s, event, view) {
     case 'turn/end': {
       s.running = false
       if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
-      // 自动朗读：语音模式优先（对讲机全链路：改写→云端合成/系统降级），普通自动朗读其次
-      if (voiceMode(s.id) && s.loaded && S.current === s.id) {
+      // 自动朗读：语音模式优先（对讲机全链路：改写→云端合成/系统降级），普通自动朗读其次。
+      // 只在实时 turn/end 上播：重连快照里的历史 turn/end 不能把旧回复再播一遍。
+      if (!historical && voiceMode(s.id) && s.loaded && S.current === s.id) {
         const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
-        if (lastA) setTimeout(() => { if (S.current === s.id) voiceSpeak(s, lastA) }, 500)
-      } else if (ttsAuto() && s.loaded && S.current === s.id) {
+        if (lastA) voiceScheduleSpeak(s, lastA)
+      } else if (!historical && ttsAuto() && s.loaded && S.current === s.id) {
         const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
         if (lastA) setTimeout(() => { if (S.current === s.id) ttsSpeak(s, lastA) }, 500)
       }
@@ -3725,7 +3731,7 @@ async function loadEarlier(s, opts) {
     const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages } })
     const older = []
     const tmp = { items: older, callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
+    for (const rec of v.records || []) foldEvent(tmp, rec.event || rec, undefined, { historical: true })
     // 这一页末尾若停在「只有思考没有正文」的消息上，它属于下一页的第一条内容，补给那个条目
     const dangling = tmp._thinkBuf || ''
     let patchedHead = null
@@ -4202,7 +4208,7 @@ Mux.handlers.follow = (v, meta) => {
     s._pendingCalls = []
     s._thinkBuf = ''
     const records = v.records || []
-    for (const rec of records) foldEvent(s, rec.event || rec)
+    for (const rec of records) foldEvent(s, rec.event || rec, undefined, { historical: true })
     for (const p of pend) {
       if (!p.rpcId && !p.text && !(p.images && p.images.length)) continue   // 无身份也无内容的老幽灵：不再续命
       if (p.rpcId && s.items.some((i) => i.rpcId === p.rpcId)) continue
@@ -6248,7 +6254,7 @@ function renderSheet(s) {
     },
   })
   }
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.2'))
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.19.2'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -6422,7 +6428,7 @@ function scanQuestions(s) {
       const recs = v.records || []
       if (!recs.length) break
       const tmp = { items: [], callArgs: new Map(), live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-      for (const rec of recs) foldEvent(tmp, rec.event || rec)
+      for (const rec of recs) foldEvent(tmp, rec.event || rec, undefined, { historical: true })
       const fresh = []
       for (const it of tmp.items) {
         if (!it || it.kind !== 'user') continue
@@ -6694,7 +6700,7 @@ async function seekToQuestion(s, ref) {
     const recs = (v.records || []).map((r) => r.event || r)
     if (!recs.length) break
     const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const e of recs) foldEvent(tmp, e)
+    for (const e of recs) foldEvent(tmp, e, undefined, { historical: true })
     block = tmp.items.concat(block)
     firstSeq = recs[0].seq
     if (firstSeq <= ref.seq) break          // 已经盖到目标提问
@@ -6723,7 +6729,7 @@ async function fillGap(s, gap) {
     if (i < 0) return   // 窗口已重组（又一次跳转），这块 gap 不在了
     if (!recs.length) { s.items.splice(i, 1); return }
     const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const e of recs) foldEvent(tmp, e)
+    for (const e of recs) foldEvent(tmp, e, undefined, { historical: true })
     const cut = recs[0].seq
     // 残余 gap 是「填不到底的下方」[gap.from..cut)，排在补进来的内容之前（时间更早）
     const refill = cut > gap.from ? [{ kind: 'gap', from: gap.from, to: cut }] : []
@@ -7768,6 +7774,7 @@ const VOICE = {
   scriptCache: new Map(), pref: null,   // pref：全文应答的并行 TTS 预取（播放零缝隙）
   retryBlob: null, autoStopping: false,   // 识别失败保留音频 + 2 分钟上限
   asrAbort: null, sendTok: 0, sysPoll: null,   // 识别可取消 + 防双发 + 系统引擎完成轮询
+  speakTimer: null, speakGen: 0,   // turn/end 的「稍后播报」可取消排期（gen 挡住旧定时器）
 }
 function voiceModes() { try { return JSON.parse(localStorage.getItem('dshm-voice-mode') || '{}') } catch (e) { return {} } }
 function voiceMode(id) { return !!voiceModes()[id] }
@@ -7883,6 +7890,7 @@ function syncVoiceSurface(s) {
 function voiceStopAll() {
   VOICE.tok++
   VOICE.sendTok++
+  voiceCancelScheduledSpeak()
   clearTimeout(VOICE.timer)
   try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (e) {}
   VOICE.asrAbort = null
@@ -8136,10 +8144,29 @@ function vRecCleanup() {
   VOICE.recProc = null; VOICE.recSource = null; VOICE.recMute = null; VOICE.recStream = null; VOICE.pcm = []
 }
 /* ---- 播报：改写 → 分段 → 云端 TTS（audio 元件，锁屏可续）→ 降级 Web Speech ---- */
+/* turn/end 后延 500ms 再开播（等最后一条渲染落定）。排期可取消：
+ * 新一轮开始 / 退出语音模式时作废；定时器醒来时若用户已在录音/识别也跳过，
+ * 旧定时器永远不会抢掉用户刚开始的对话。 */
+function voiceScheduleSpeak(s, item) {
+  voiceCancelScheduledSpeak()
+  const gen = VOICE.speakGen
+  VOICE.speakTimer = setTimeout(() => {
+    if (VOICE.speakGen !== gen || S.current !== s.id) return
+    if (VOICE.state === 'recording' || VOICE.state === 'asr') return   // 用户已在录/刚松开：这条回复已经不新鲜
+    voiceSpeak(s, item)
+  }, 500)
+}
+function voiceCancelScheduledSpeak() {
+  VOICE.speakGen++
+  if (VOICE.speakTimer) { clearTimeout(VOICE.speakTimer); VOICE.speakTimer = null }
+}
 async function voiceSpeak(s, item) {
+  if (VOICE.state === 'recording' || VOICE.state === 'asr') return   // 不打断用户正在进行的输入
+  voiceCancelScheduledSpeak()
   const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 24))
   VOICE.lastSpokenKey = key; VOICE.lastSpokenItem = item
-  vElStop(); vRevokePref(); VOICE.segMode = null
+  // 新回复顶替旧播报：三种引擎都先停干净，避免旧回复在下面拿稿/预取期间继续出声
+  vWaStop(); vElStop(); ttsStop(true); vRevokePref(); VOICE.segMode = null
   VOICE.userPaused = false; VOICE.curBuf = null; VOICE.curSeg = null; VOICE.pausedOffset = 0
   vSetState('speaking')   // 先占状态；下面拿稿期间 word 显示"整理口语稿…"
   vFlash('整理口语稿…')
