@@ -1,0 +1,54 @@
+#!/usr/bin/expect -f
+# ------------------------------------------------------------------------------
+# npm publish with 2FA (WebAuthn / passkey accounts) from a non-interactive shell.
+#
+# Why this exists: when the npm account requires two-factor auth, a plain
+# `npm publish` from a script/CI dies immediately with EOTP. Under a real PTY,
+# npm instead offers the web flow — "Authenticate your account at <url>" — and
+# polls until someone approves in the browser. This helper gives npm that PTY,
+# surfaces the URL, presses Enter (npm opens the browser itself), and propagates
+# npm's exit code when it finishes.
+#
+# Usage:
+#   expect scripts/publish-npm.exp              # publish the package in this repo
+#   expect scripts/publish-npm.exp ../other-pkg # or an explicit package directory
+#
+# Requirements:
+#   - expect (macOS ships /usr/bin/expect)
+#   - an npm login in ~/.npmrc (`npm whoami` works; `npm login --auth-type=web`)
+#   - a human near the browser to approve the WebAuthn prompt (Touch ID etc.)
+#
+# The auth URL is also written to /tmp/npm-auth-url.txt so another agent can
+# open it programmatically.
+# ------------------------------------------------------------------------------
+
+set timeout 420
+set pkgdir [lindex $argv 0]
+if {$pkgdir eq ""} {
+    set pkgdir [file normalize [file join [file dirname [info script]] ..]]
+}
+cd $pkgdir
+log_user 1
+
+spawn -noecho env TERM=xterm-256color npm publish
+
+expect {
+    -re {https://www\.npmjs\.com/auth/cli/\S+} {
+        set url $expect_out(0,string)
+        catch {exec sh -c "echo -n $url > /tmp/npm-auth-url.txt"}
+        send -- "\r"   ;# let npm open the browser for approval
+        exp_continue
+    }
+    -re {Press ENTER|to open in the browser} {
+        send -- "\r"
+        exp_continue
+    }
+    timeout {
+        puts stderr "\npublish-npm.exp: timed out waiting for browser approval"
+        exit 1
+    }
+    eof
+}
+
+catch wait result
+exit [lindex $result 3]
