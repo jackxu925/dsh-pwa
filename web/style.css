@@ -1656,7 +1656,8 @@ html.light .team-sheet-title span { color:#0f766e; }
   transition: opacity .5s ease; animation: v-hbreath 3.6s ease-in-out infinite; }
 @keyframes v-hbreath { 0%,100% { transform: scale(.96); } 50% { transform: scale(1.05); } }
 .voice-view[data-state=recording] .v-halo { background: radial-gradient(closest-side, rgba(255,69,58,.36), transparent 70%); animation: v-hpulse 1.7s ease-in-out infinite; }
-.voice-view[data-state=asr] .v-halo, .voice-view[data-state=thinking] .v-halo { background: radial-gradient(closest-side, rgba(191,90,242,.30), transparent 70%); }
+.voice-view[data-state=asr] .v-halo { background: radial-gradient(closest-side, rgba(191,90,242,.30), transparent 70%); }
+.voice-view[data-state=thinking] .v-halo { background: radial-gradient(closest-side, rgba(255,159,10,.32), transparent 70%); }
 .voice-view[data-state=speaking] .v-halo { background: radial-gradient(closest-side, rgba(106,166,255,.32), transparent 70%); }
 @keyframes v-hpulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 .voice-view.v-paused .v-halo, .voice-view.v-canceling .v-halo { opacity: .3; }
@@ -1689,7 +1690,8 @@ html.light .team-sheet-title span { color:#0f766e; }
 .v-tint { position: absolute; inset: 0; border-radius: 50%; opacity: 0; transition: opacity .5s ease; }
 .voice-view[data-state=idle] .v-tint { opacity: 1; background: radial-gradient(55% 55% at 50% 40%, rgba(106,166,255,.11), transparent 70%); }
 .voice-view[data-state=recording] .v-tint { opacity: 1; background: radial-gradient(60% 60% at 50% 42%, rgba(255,69,58,.30), transparent 72%); }
-.voice-view[data-state=asr] .v-tint, .voice-view[data-state=thinking] .v-tint { opacity: 1; background: radial-gradient(60% 60% at 50% 42%, rgba(191,90,242,.20), transparent 72%); }
+.voice-view[data-state=asr] .v-tint { opacity: 1; background: radial-gradient(60% 60% at 50% 42%, rgba(191,90,242,.20), transparent 72%); }
+.voice-view[data-state=thinking] .v-tint { opacity: 1; background: radial-gradient(60% 60% at 50% 42%, rgba(255,159,10,.22), transparent 72%); }
 .voice-view[data-state=speaking] .v-tint { opacity: 1; background: radial-gradient(60% 60% at 50% 42%, rgba(106,166,255,.22), transparent 72%); }
 .voice-view.v-paused .v-tint { opacity: .35; }
 .v-core { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 10px; }
@@ -1767,10 +1769,12 @@ html.light .v-mic { color: var(--text-2); }
 html.light .voice-view[data-state=recording] .v-mic { color: #b91c1c; filter: none; }
 html.light .v-rec-time { color: #b91c1c; }
 html.light .voice-view[data-state=recording] .v-word { color: #b91c1c; }
-html.light .voice-view[data-state=asr] .v-word, html.light .voice-view[data-state=thinking] .v-word { color: var(--purple); }
+html.light .voice-view[data-state=asr] .v-word { color: var(--purple); }
 html.light .voice-view[data-state=recording] .v-cz-tip { color: #b91c1c; }
 html.light .voice-view.v-canceling .v-cz-tip { color: #fff; }
 html.light .v-halo { opacity: .45; }
+html.light .voice-view[data-state=thinking] .v-halo { background: radial-gradient(closest-side, rgba(154,74,6,.22), transparent 70%); }
+html.light .voice-view[data-state=thinking] .v-tint { background: radial-gradient(60% 60% at 50% 42%, rgba(154,74,6,.14), transparent 72%); }
 html.light .v-cell:not(:disabled):active { background: rgba(15,23,42,.06); }
 /* 对讲机表层：禁止 iOS 长按选中文本/呼出系统菜单——按住说话本就是一种长按，
    不禁止的话整个页面会被蓝色选中高亮，且挡住按钮操作（真机实测）。 */
@@ -1788,3 +1792,24 @@ html.light .v-cell:not(:disabled):active { background: rgba(15,23,42,.06); }
   cursor: pointer; transition: background .16s var(--ease-out), color .16s var(--ease-out);
 }
 .vm-seg button.on { background: var(--accent-fill); color: #fff; font-weight: 500; }
+/* ============ 语音模式：整屏状态色（用户指定：用颜色表达"正在做什么"，替代口播"我在想"） ============ */
+.v-amb { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .5s ease; }
+.v-amb.v-a-idle { background: radial-gradient(120% 80% at 50% 0%, rgba(106,166,255,.05), transparent 70%); }
+.v-amb.v-a-rec { background: radial-gradient(120% 80% at 50% 0%, rgba(255,69,58,.14), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(255,69,58,.08), transparent 65%); }
+.v-amb.v-a-asr { background: radial-gradient(120% 80% at 50% 0%, rgba(191,90,242,.13), transparent 70%); }
+.v-amb.v-a-work { background: radial-gradient(120% 80% at 50% 0%, rgba(255,159,10,.11), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(255,159,10,.06), transparent 65%); }
+.v-amb.v-a-speak { background: radial-gradient(120% 80% at 50% 0%, rgba(59,130,246,.14), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(59,130,246,.07), transparent 65%); }
+.voice-view[data-state=idle] .v-a-idle { opacity: 1; }
+.voice-view[data-state=recording] .v-a-rec { opacity: 1; }
+.voice-view[data-state=asr] .v-a-asr { opacity: 1; }
+.voice-view[data-state=thinking] .v-a-work { opacity: 1; }
+.voice-view[data-state=speaking] .v-a-speak { opacity: 1; }
+html.light .v-amb.v-a-idle { background: radial-gradient(120% 80% at 50% 0%, rgba(37,99,235,.045), transparent 70%); }
+html.light .v-amb.v-a-rec { background: radial-gradient(120% 80% at 50% 0%, rgba(193,18,31,.10), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(193,18,31,.06), transparent 65%); }
+html.light .v-amb.v-a-asr { background: radial-gradient(120% 80% at 50% 0%, rgba(109,40,217,.10), transparent 70%); }
+html.light .v-amb.v-a-work { background: radial-gradient(120% 80% at 50% 0%, rgba(154,74,6,.13), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(154,74,6,.06), transparent 65%); }
+html.light .v-amb.v-a-speak { background: radial-gradient(120% 80% at 50% 0%, rgba(37,99,235,.10), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(37,99,235,.05), transparent 65%); }
+.voice-view > .v-cancel, .voice-view > .v-zone, .voice-view > .v-deck, .voice-view > .vv-foot { position: relative; z-index: 1; }
+/* 思考/干活=琥珀色（与识别紫、播报蓝区分开） */
+.voice-view[data-state=thinking] .v-word { color: #ffb84d; }
+html.light .voice-view[data-state=thinking] .v-word { color: #9a4a06; }

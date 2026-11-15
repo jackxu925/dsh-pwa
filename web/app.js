@@ -7168,6 +7168,7 @@ function buildShell() {
       </div>
     </div>
     <div class="voice-view" id="voice-view" data-state="idle" style="display:none" aria-label="语音模式">
+      <div class="v-amb v-a-idle"></div><div class="v-amb v-a-rec"></div><div class="v-amb v-a-asr"></div><div class="v-amb v-a-work"></div><div class="v-amb v-a-speak"></div>
       <div class="v-cancel" id="v-cancel" aria-hidden="true"><span class="v-cz-tip">↑ 松开手指 · 取消发送</span></div>
       <div class="v-zone" id="v-zone">
         <div class="v-orb-wrap" aria-hidden="true">
@@ -7764,7 +7765,7 @@ const VOICE = {
   paras: [], pi: 0, engine: 'cloud', fetchingPara: -1,
   lastSpokenKey: null, lastSpokenItem: null,
   scriptCache: new Map(), pref: null,   // pref：全文应答的并行 TTS 预取（播放零缝隙）
-  retryBlob: null, autoStopping: false, coach1: null, coach2: null,   // 识别失败保留音频 + 2 分钟上限 + 处理期有声陪伴
+  retryBlob: null, autoStopping: false,   // 识别失败保留音频 + 2 分钟上限
   asrAbort: null, sendTok: 0, sysPoll: null,   // 识别可取消 + 防双发 + 系统引擎完成轮询
 }
 function voiceModes() { try { return JSON.parse(localStorage.getItem('dshm-voice-mode') || '{}') } catch (e) { return {} } }
@@ -7831,7 +7832,6 @@ function vSetState(st) {
   VOICE.state = st
   const v = $('#voice-view')
   if (!v) return
-  if (st !== 'thinking') vCoachStop()   // 离开思考态：停止有声陪伴
   v.dataset.state = st
   if (st !== 'recording') VOICE.cancelPending = false
   v.classList.toggle('v-canceling', st === 'recording' && VOICE.cancelPending)
@@ -7883,7 +7883,6 @@ function voiceStopAll() {
   VOICE.tok++
   VOICE.sendTok++
   clearTimeout(VOICE.timer)
-  vCoachStop()
   try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (e) {}
   VOICE.asrAbort = null
   VOICE.paras = []; VOICE.pi = 0; VOICE.wasSpeaking = false; VOICE.prevWorking = null
@@ -8023,38 +8022,10 @@ async function vTranscribeAndSend(blob) {
   VOICE.retryBlob = null
   vSetState('thinking')                 // 保持"思考中"直到 turn/end 触发播报或用户再按
   vibrate([18, 70, 18]); vRoger()
-  vCoachStart()                         // 处理期有声陪伴：稍后轻声说"我在想"，长任务再说一次
   const s = sess(S.current)
   const hint = '\n\n（语音模式：我正在听，请用口语短段落回复、先说结论、不要贴长代码或表格）'
   sendPrompt(S.current, text + hint, null, s && s.running ? 'steer' : undefined)
-    .catch(() => { if (myTok === VOICE.sendTok && VOICE.state === 'thinking') { vCoachStop(); vSetState('idle') } })
-}
-/* ---- 处理期有声陪伴（仅信号，不长篇）---- */
-function vCoachStart() {
-  vCoachStop()
-  VOICE.coach1 = setTimeout(() => { if (VOICE.state === 'thinking') vSayShort('嗯，我在想') }, 3000)
-  VOICE.coach2 = setTimeout(() => { if (VOICE.state === 'thinking') vSayShort('还在处理，马上好') }, 16000)
-}
-function vCoachStop() {
-  clearTimeout(VOICE.coach1); clearTimeout(VOICE.coach2)
-  VOICE.coach1 = VOICE.coach2 = null
-}
-async function vSayShort(text) {
-  if (VOICE.state !== 'thinking') return
-  try {
-    const r = await fetch('/api/pwa.tts', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text, voice: 'stella' }), signal: AbortSignal.timeout(8000),
-    })
-    if (!r.ok) throw new Error('tts ' + r.status)
-    const ab = await r.arrayBuffer()
-    if (VOICE.state !== 'thinking') return
-    const buf = await VAC.decodeAudioData(ab)
-    if (VOICE.state !== 'thinking') return
-    await vWaPlay(buf, 0)
-  } catch (e) {
-    try { ttsSpeak(sess(S.current), { text }) } catch (e2) {}
-  }
+    .catch(() => { if (myTok === VOICE.sendTok && VOICE.state === 'thinking') vSetState('idle') })
 }
 /* ---- 录音（2026-11-15 v2：WebAudio 采 PCM、客户端编 WAV）
  * iOS MediaRecorder 的 m4a 分片封装不标准，宿主机 afconvert 打不开（真机实测报
