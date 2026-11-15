@@ -29,6 +29,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 
 ## Features
 
+- 🎙 **Voice mode (walkie-talkie)**: switch with the Text | Voice control in the chat header — hold to talk, release to send, swipe up to cancel, hold to barge in while it speaks; speech goes through DeepSeek ASR, replies are rewritten into a spoken script and voiced with DeepSeek TTS (rate changes keep the timbre), with a soft `thinking` cue during long turns, a 2-minute cap, and retry-without-losing-audio on ASR failure.
 - 📋 **Session list** with last-message previews, unread dots, day grouping, workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and rename / fork / archive
 - 👥 **Agent Teams & sub-sessions**: a team signal on the Lead's session card, an in-chat team band that opens a read-only roster + task board (with write-scope overlap hints), and member child sessions with lineage, real mode chips (continuable / one-shot) and teammate relay bubbles — no new home tab; one-shot children and continuable children whose direct parent is offline stay read-only
 - 🗂 **Session info menu**: the ⋯ sheet shows the session title, Session ID and working path (tap either to copy), with settings grouped into chat / content / manage sections

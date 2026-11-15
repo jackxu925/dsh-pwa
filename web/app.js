@@ -112,6 +112,7 @@ const ICONS = {
   chev: SVG_OPEN + '<path d="m9 6 6 6-6 6"/></svg>',
   chart: SVG_OPEN + '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   speaker: SVG_OPEN + '<path d="M3 9.5v5h3.5L12 19V5L6.5 9.5z"/><path d="M15.5 8.8a4.6 4.6 0 0 1 0 6.4M18 6.3a8 8 0 0 1 0 11.4"/>',
+  mic: SVG_OPEN + '<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>',
   brain: SVG_OPEN + '<path d="M9.5 3a2.5 2.5 0 0 0-2.5 2.5c0 .4.1.7.2 1A3.5 3.5 0 0 0 5 13.5a3.5 3.5 0 0 0 2.2 6.2A2.5 2.5 0 0 0 11 21V5.5A2.5 2.5 0 0 0 9.5 3z"/><path d="M14.5 3a2.5 2.5 0 0 1 2.5 2.5c0 .4-.1.7-.2 1a3.5 3.5 0 0 1 2.2 7A3.5 3.5 0 0 1 16.8 19.7 2.5 2.5 0 0 1 13 21V5.5A2.5 2.5 0 0 1 14.5 3z"/></svg>',
   /* 思考图标（用户选定「打字泡」）：气泡里三颗点，live 时 CSS 驱动波浪 */
   think: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.9 5.6 5.6 1.9-5.6 1.9L12 18.5l-1.9-5.6-5.6-1.9 5.6-1.9z"/><path d="M18.5 3l.6 1.9 1.9.6-1.9.6-.6 1.9-.6-1.9-1.9-.6 1.9-.6z" stroke-width="1.2"/></svg>',
@@ -870,8 +871,11 @@ function foldEvent(s, event, view) {
     case 'turn/end': {
       s.running = false
       if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
-      // 自动朗读（默认关）：本轮最后一条有字的助手消息，稍等半秒开读
-      if (ttsAuto() && s.loaded && S.current === s.id) {
+      // 自动朗读：语音模式优先（对讲机全链路：改写→云端合成/系统降级），普通自动朗读其次
+      if (voiceMode(s.id) && s.loaded && S.current === s.id) {
+        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+        if (lastA) setTimeout(() => { if (S.current === s.id) voiceSpeak(s, lastA) }, 500)
+      } else if (ttsAuto() && s.loaded && S.current === s.id) {
         const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
         if (lastA) setTimeout(() => { if (S.current === s.id) ttsSpeak(s, lastA) }, 500)
       }
@@ -1527,7 +1531,7 @@ function itemNodeInner(s, item) {
           if (q.note) b.appendChild(el('div', 'qnote', '【注】' + q.note))
         }
         if (parsed.body) b.appendChild(el('div', 'qbody', parsed.body))
-      } else if (item.text) b.innerHTML = linkifyText(item.text)  // 裸 URL 可点；换行由 pre-wrap 保留
+      } else if (item.text) b.innerHTML = linkifyText(voiceStripHint(item.text))  // 裸 URL 可点；换行由 pre-wrap 保留
       if (item.images) for (const img of item.images) {
         if (img.previewUrl) {
           const im = el('img', 'msg-img')
@@ -4407,6 +4411,7 @@ function refreshChatChrome(s) {
   renderTeamBand(s)
   renderLineage(s)
   renderReadonlyComposer(s)
+  syncVoiceSurface(s)   // 语音模式表层的显隐跟随会话开关与只读态
   // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
   const input2 = $('#chat-input')
   if (input2 && !off) {
@@ -5447,6 +5452,7 @@ function closeProto() { if (protoView) { protoView.remove(); protoView = null } 
 function route() {
   const h = location.hash || '#/'
   ttsStop()   // 切走就别念了
+  voiceStopAll()   // 语音模式同理：切走停播报/停录音
   // 离开会话：把「看到现在」记为已读（覆盖观看期间静默折叠进来的事件；正在运行的轮由 turn/end 实时记）
   if (S.current && S.sessions.has(S.current) && !h.startsWith('#/s/' + S.current)) markSeenNow(S.sessions.get(S.current))
   if (h === '#/proto') { S.current = null; showProto(); return }
@@ -7111,6 +7117,10 @@ function buildShell() {
     <div class="navbar"><div class="bar">
       <button class="nav-btn back" id="chat-back" aria-label="返回"><span class="ic-slot" data-ic="back"></span></button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
+      <div class="vm-seg" id="vm-seg" role="tablist" aria-label="输入模式：文字或语音">
+        <button type="button" id="vm-text" role="tab" aria-selected="true">文字</button>
+        <button type="button" id="vm-voice" role="tab" aria-selected="false">语音</button>
+      </div>
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
       <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>
@@ -7156,6 +7166,41 @@ function buildShell() {
         <div class="input-box" id="chat-input" contenteditable data-ph="发消息…" aria-label="消息输入框"></div>
         <button class="send" id="send-btn" aria-label="发送"><span class="ic-slot" data-ic="send"></span></button>
       </div>
+    </div>
+    <div class="voice-view" id="voice-view" data-state="idle" style="display:none" aria-label="语音模式">
+      <div class="v-cancel" id="v-cancel" aria-hidden="true"><span class="v-cz-tip">↑ 松开手指 · 取消发送</span></div>
+      <div class="v-zone" id="v-zone">
+        <div class="v-orb-wrap" aria-hidden="true">
+          <div class="v-halo"></div>
+          <div class="v-ripple r1"></div><div class="v-ripple r2"></div>
+          <div class="v-bezel"></div>
+          <div class="v-orb">
+            <div class="v-tint"></div>
+            <div class="v-core">
+              <svg class="v-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>
+              <div class="v-rec-time" id="v-rec-time">0:00</div>
+              <div class="v-dots"><i></i><i></i><i></i></div>
+              <div class="v-wave"><i></i><i></i><i></i><i></i><i></i></div>
+            </div>
+          </div>
+        </div>
+        <div class="v-word" id="v-word">就绪</div>
+        <div class="v-hint" id="v-hint">按住说话 · 松手发送</div>
+      </div>
+      <nav class="v-deck" aria-label="播报控制">
+        <button class="v-cell" id="v-pp" type="button" disabled aria-label="暂停播报">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="5" width="3.6" height="14" rx="1.8"/><rect x="13.4" y="5" width="3.6" height="14" rx="1.8"/></svg>
+          <span class="v-cl">暂停</span>
+        </button>
+        <button class="v-cell" id="v-replay" type="button" disabled aria-label="重听">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          <span class="v-cl">重听</span>
+        </button>
+        <button class="v-cell" id="v-rate" type="button" aria-label="切换语速">
+          <span class="v-rv" id="v-rate-val">1×</span>
+          <span class="v-cl">语速</span>
+        </button>
+      </nav>
     </div>
     <button class="new-msg-pill" id="new-msg-pill" type="button">↓ 新消息</button>
   </div>
@@ -7702,7 +7747,698 @@ if (window.visualViewport) {
     revealFocusedEditable()
   })
 }
+/* ================= 语音模式（对讲机，2026-11-15） =================
+ * 交互契约与 prototype/voice-mode 已确认版一致：按住任意处说话、松手发送、
+ * 上滑取消、播报中按住＝打断插话、轻点＝暂停/继续；甲板常驻 暂停/重听/语速。
+ * 输入：录音 → 宿主 /api/pwa.asr（DeepSeek）；输出：/api/pwa.tts-script 改写口语稿
+ * → /api/pwa.tts 云端合成（锁屏可续播）→ <audio> 顺序播放；无 key 时输出回退
+ * 系统 Web Speech（复用本文件 TTS 模块），输入侧给出明确提示。
+ * 风格：token 全部来自本表 CSS 变量（PWA 同源）。 */
+const VOICE = {
+  state: 'idle', tok: 0, timer: null, holdT0: 0,
+  cancelPending: false, cancelRect: null,
+  wasSpeaking: false, pausedAtDown: false, prevWorking: null,
+  recStream: null, recProc: null, recSource: null, recMute: null, pcm: [], micOK: null,
+  wSrc: null, wStartAt: 0, wOffset: 0, wPlaying: false, wResolve: null, curBuf: null, pausedOffset: 0, userPaused: false,
+  el: null, elReady: false, elActive: false, elResolve: null, curSeg: null, segMode: null,
+  paras: [], pi: 0, engine: 'cloud', fetchingPara: -1,
+  lastSpokenKey: null, lastSpokenItem: null,
+  scriptCache: new Map(), pref: null,   // pref：全文应答的并行 TTS 预取（播放零缝隙）
+  retryBlob: null, autoStopping: false, coach1: null, coach2: null,   // 识别失败保留音频 + 2 分钟上限 + 处理期有声陪伴
+  asrAbort: null, sendTok: 0, sysPoll: null,   // 识别可取消 + 防双发 + 系统引擎完成轮询
+}
+function voiceModes() { try { return JSON.parse(localStorage.getItem('dshm-voice-mode') || '{}') } catch (e) { return {} } }
+function voiceMode(id) { return !!voiceModes()[id] }
+function voiceSetMode(id, on) {
+  const m = voiceModes()
+  if (on) m[id] = 1; else delete m[id]
+  try { localStorage.setItem('dshm-voice-mode', JSON.stringify(m)) } catch (e) {}
+}
+function micAvailable() {
+  if (VOICE.micOK !== null) return VOICE.micOK
+  VOICE.micOK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)
+  return VOICE.micOK
+}
+/* ---- 声音编排（earcon：升=开始，降=结束，双降=警示；iOS 无震动 API，音频即触觉） ---- */
+let VAC = null
+function vEnsureAudio() {
+  try {
+    if (!VAC) VAC = new (window.AudioContext || window.webkitAudioContext)()
+    if (VAC.state === 'suspended') VAC.resume()
+  } catch (e) {}
+}
+function vUnlock() {
+  vEnsureAudio()
+  if (!VAC || VAC._unlocked) return
+  try {
+    const src = VAC.createBufferSource()
+    src.buffer = VAC.createBuffer(1, 1, 22050)
+    src.connect(VAC.destination); src.start(0)
+    if (VAC.state === 'running') VAC._unlocked = true
+  } catch (e) {}
+}
+function vTone(freq, t0, dur, gain, type) {
+  const o = VAC.createOscillator(), g = VAC.createGain()
+  o.type = type || 'sine'; o.frequency.value = freq
+  const t = VAC.currentTime + t0
+  g.gain.setValueAtTime(0.0001, t)
+  g.gain.exponentialRampToValueAtTime(gain, t + 0.012)
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+  o.connect(g); g.connect(VAC.destination)
+  o.start(t); o.stop(t + dur + 0.02)
+}
+function vCue(fn) { try { vUnlock(); if (VAC) fn() } catch (e) {} }
+const vPress = () => vCue(() => vTone(523, 0, .04, .16, 'triangle'))
+const vWarn = () => vCue(() => { vTone(700, 0, .06, .12); vTone(540, .075, .07, .12) })
+const vBack = () => vCue(() => vTone(660, 0, .05, .10))
+const vRoger = () => { vCue(() => { vTone(740, 0, .08, .16); vTone(1108, .10, .12, .14) }) }
+const vTick = () => vCue(() => vTone(660, 0, .05, .10))
+const vDone = () => vCue(() => { vTone(880, 0, .09, .13); vTone(587, .11, .13, .12) })
+const vDiscard = () => vCue(() => vTone(420, 0, .09, .14, 'triangle'))
+const vPauseCue = () => vCue(() => vTone(560, 0, .05, .11))
+const vResumeCue = () => vCue(() => vTone(740, 0, .05, .11))
+document.addEventListener('click', vUnlock, { passive: true })
+/* ---- 状态渲染 ---- */
+const V_WORDS = { idle: '就绪', recording: '在听', asr: '识别中…', thinking: '发送中…', speaking: '正在播报' }
+function vFlash(t, shake) {
+  const w = $('#v-word')
+  if (!w) return
+  w.textContent = t
+  w.classList.remove('v-swap', 'v-shake'); void w.offsetWidth
+  w.classList.add(shake ? 'v-shake' : 'v-swap')
+}
+function vSetState(st) {
+  VOICE.state = st
+  const v = $('#voice-view')
+  if (!v) return
+  if (st !== 'thinking') vCoachStop()   // 离开思考态：停止有声陪伴
+  v.dataset.state = st
+  if (st !== 'recording') VOICE.cancelPending = false
+  v.classList.toggle('v-canceling', st === 'recording' && VOICE.cancelPending)
+  v.classList.toggle('v-paused', st === 'speaking' && vIsPaused())
+  let w = V_WORDS[st], h = ''
+  if (st === 'idle') {
+    if (!micAvailable()) h = '麦克风不可用：需 HTTPS 访问（tailscale serve）'
+    else if (VOICE.retryBlob) h = '识别失败 · 轻点重试 · 或按住重说'
+    else h = '按住说话 · 松手发送 · 上滑取消'
+  }
+  else if (st === 'recording') h = VOICE.cancelPending ? '松开手指 · 取消发送' : '松手发送 · 上滑取消 · 最长 2 分钟'
+  else if (st === 'asr') h = '正在识别你说的话…'
+  else if (st === 'thinking') h = '正在组织回答…'
+  else if (st === 'speaking') h = vIsPaused() ? '轻点继续 · 按住插话' : '按住可打断插话 · 轻点暂停'
+  const we = $('#v-word')
+  if (we && we.textContent !== w) { we.textContent = w; we.classList.remove('v-swap'); void we.offsetWidth; we.classList.add('v-swap') }
+  $('#v-hint').textContent = h
+  vSyncDeck()
+}
+function vSyncDeck() {
+  const speaking = VOICE.state === 'speaking'
+  const pp = $('#v-pp')
+  if (pp) { pp.disabled = !speaking; pp.setAttribute('aria-label', vIsPaused() ? '继续播报' : '暂停播报'); pp.classList.toggle('v-resume', vIsPaused()) }
+  const rp = $('#v-replay')
+  if (rp) rp.disabled = !(speaking || (VOICE.state === 'idle' && VOICE.paras.length))
+}
+function vIsPaused() { return VOICE.state === 'speaking' && !!VOICE.userPaused }
+/* ---- 界面挂载/卸载（会话级开关） ---- */
+function syncVoiceSurface(s) {
+  const v = $('#voice-view')
+  if (!v) return
+  const ro = subagentReadonly(s)
+  const on = voiceMode(s.id) && !ro
+  v.style.display = on ? 'flex' : 'none'
+  const comp = $('#view-chat .composer-wrap')
+  if (comp) comp.style.visibility = on ? 'hidden' : ''
+  // 顶栏模式切换：文字|语音 是并列关系（真机反馈：藏在 ⋯ 里的开关不像'模式'）
+  const seg = $('#vm-seg')
+  if (seg) {
+    seg.style.display = ro ? 'none' : ''
+    const vt = $('#vm-text'), vv = $('#vm-voice')
+    if (vt) { vt.classList.toggle('on', !on); vt.setAttribute('aria-selected', String(!on)) }
+    if (vv) { vv.classList.toggle('on', !!on); vv.setAttribute('aria-selected', String(on)) }
+  }
+  if (!on && VOICE.state !== 'idle') voiceStopAll()
+  if (on) { vSetState(VOICE.state === 'idle' ? 'idle' : VOICE.state); voiceWakeLock() }
+}
+function voiceStopAll() {
+  VOICE.tok++
+  VOICE.sendTok++
+  clearTimeout(VOICE.timer)
+  vCoachStop()
+  try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (e) {}
+  VOICE.asrAbort = null
+  VOICE.paras = []; VOICE.pi = 0; VOICE.wasSpeaking = false; VOICE.prevWorking = null
+  VOICE.cancelPending = false
+  VOICE.pref = null; VOICE.retryBlob = null
+  vRecCleanup()   // 停采集、释放麦克风
+  clearInterval(VOICE.sysPoll)
+  vAudioStop()
+  ttsStop(true)
+  vSetState('idle')
+}
+function vAudioStop() {
+  vWaStop()
+  vElStop()
+  VOICE.curBuf = null
+  VOICE.curSeg = null
+  VOICE.segMode = null
+  VOICE.userPaused = false
+  VOICE.pausedOffset = 0
+}
+let vWakeLock = null
+async function voiceWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !vWakeLock && voiceMode(S.current || '')) vWakeLock = await navigator.wakeLock.request('screen')
+  } catch (e) { vWakeLock = null }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) voiceWakeLock() })
+/* ---- 按压手势：录音 / 上滑取消 / 轻点暂停 / 打断 ---- */
+function vOnDown(e) {
+  if (VOICE.state === 'recording') return
+  e.preventDefault()
+  const zone = $('#v-zone')
+  try { zone.setPointerCapture(e.pointerId) } catch (err) {}
+  VOICE.holdT0 = Date.now()
+  VOICE.cancelPending = false
+  VOICE.cancelRect = ($('#v-cancel') || {}).getBoundingClientRect ? $('#v-cancel').getBoundingClientRect() : null
+  VOICE.prevWorking = (VOICE.state === 'asr' || VOICE.state === 'thinking') ? VOICE.state : null
+  VOICE.wasSpeaking = (VOICE.state === 'speaking')
+  VOICE.pausedAtDown = vIsPaused()
+  vUnlock(); vUnlockEl()
+  if (VOICE.wasSpeaking) {
+    if (VOICE.engine === 'system') { try { speechSynthesis.pause() } catch (err) {} }       // 降级引擎：同样"按下即静音"
+    else if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) { try { VOICE.el.pause() } catch (err) {} }   // 元素播放：pause 保位置，轻点/自愈可续
+    else if (VOICE.wPlaying) { VOICE.pausedOffset = vWaElapsed(); vWaStop() }   // 立即静音；缓冲保命，轻点可恢复
+  } else {
+    // asr/thinking 期间按住：掐掉上一条在途识别（它已被这次按打断言取代），直接录新话
+    if (VOICE.prevWorking) {
+      VOICE.sendTok++
+      try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (err) {}
+      VOICE.asrAbort = null
+    }
+    if (!micAvailable()) { toast('麦克风不可用：需要 HTTPS 访问（tailscale serve 后重进）', true); return }
+    vRecStart()
+  }
+  vPress(); vibrate(8)
+  vSetState('recording')
+}
+function vOnMove(e) {
+  if (VOICE.state !== 'recording' || !VOICE.cancelRect) return
+  const inC = e.clientY <= VOICE.cancelRect.bottom + 6
+  if (inC !== VOICE.cancelPending) {
+    VOICE.cancelPending = inC
+    vibrate(12); inC ? vWarn() : vBack()
+    vSetState('recording')
+  }
+}
+async function vOnUp(e) {
+  if (VOICE.state !== 'recording') return
+  if (e.cancelable) e.preventDefault()
+  const held = Date.now() - VOICE.holdT0
+  if (VOICE.cancelPending) {           // 上滑取消：作废，什么都不发
+    vRecDiscard()
+    if (VOICE.prevWorking) clearTimeout(VOICE.timer)
+    if (VOICE.wasSpeaking) {           // 反悔自愈：从中断处继续
+      if (VOICE.pausedAtDown) { VOICE.userPaused = true }
+      else if (VOICE.engine === 'system') { try { speechSynthesis.resume() } catch (err) {} }
+      else if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) { VOICE.userPaused = false; try { VOICE.el.play() } catch (err) {} }
+      else { VOICE.userPaused = false; vRunSeg(VOICE.lastSpokenKey, VOICE.pausedOffset || 0) }
+      vSetState('speaking'); vFlash(VOICE.pausedAtDown ? '已取消 · 维持暂停' : '已取消 · 继续播报'); vResumeCue()
+    } else { vSetState('idle'); vFlash('已取消'); vDiscard() }   // 取消后必须回 idle：否则录音计时器/在听视觉会一直跑（真机反馈）
+    VOICE.prevWorking = null; VOICE.wasSpeaking = false
+    vibrate(6)
+    return
+  }
+  if (held < 250) {                    // 轻点
+    if (VOICE.wasSpeaking) { vTogglePause(); VOICE.prevWorking = null; return }
+    if (VOICE.prevWorking) { const pw = VOICE.prevWorking; VOICE.prevWorking = null; vSetState(pw); return }
+    if (VOICE.retryBlob) {             // 识别失败后轻点：重试刚才那段音频（不重录）
+      const b = VOICE.retryBlob
+      VOICE.retryBlob = null
+      vRecDiscard()
+      vTranscribeAndSend(b)
+      return
+    }
+    vRecDiscard(); vSetState('idle'); vFlash('轻点了 · 按住说话', true)
+    return
+  }
+  // 正常发话（也用于 2 分钟上限自动发送）
+  VOICE.prevWorking = null
+  if (VOICE.wasSpeaking) {             // 打断播报发话：此刻才真正终止
+    VOICE.tok++
+    vAudioStop(); ttsStop(true)
+  }
+  VOICE.wasSpeaking = false
+  vSubmitRecording()
+}
+/* 停止录音并送出发言；识别失败时保留音频（VOICE.retryBlob），轻点可重试——绝不直接丢 */
+async function vSubmitRecording() {
+  if (VOICE.state !== 'recording') return
+  const blob = vRecStop()
+  if (!blob) { vSetState('idle'); vFlash('没录上 · 再试一次'); return }
+  await vTranscribeAndSend(blob)
+}
+async function vTranscribeAndSend(blob) {
+  const myTok = ++VOICE.sendTok
+  vSetState('asr')
+  let text = ''
+  VOICE.asrAbort = new AbortController()
+  const timeout = setTimeout(() => { try { VOICE.asrAbort.abort() } catch (err) {} }, 40000)
+  try {
+    const r = await fetch('/api/pwa.asr', { method: 'POST', body: blob, headers: { 'content-type': blob.type || 'audio/wav' }, signal: VOICE.asrAbort.signal })
+    if (r.status === 401) { markAuthExpired(); throw new Error('登录已过期') }
+    const j = await r.json().catch(() => null)
+    if (!r.ok) throw new Error((j && j.message) || ('ASR ' + r.status))
+    text = String((j && j.text) || '').trim()
+  } catch (err) {
+    clearTimeout(timeout); VOICE.asrAbort = null
+    if (myTok !== VOICE.sendTok) return
+    VOICE.retryBlob = blob   // 音频先留住
+    vSetState('idle'); vFlash('识别失败 · 轻点重试', true)
+    toast('识别失败：' + err.message + '（音频已保留，轻点可重试）', true)
+    return
+  }
+  clearTimeout(timeout); VOICE.asrAbort = null
+  if (myTok !== VOICE.sendTok) return
+  if (!text) { VOICE.retryBlob = blob; vSetState('idle'); vFlash('没听清 · 轻点重试或再说一次', true); return }
+  VOICE.retryBlob = null
+  vSetState('thinking')                 // 保持"思考中"直到 turn/end 触发播报或用户再按
+  vibrate([18, 70, 18]); vRoger()
+  vCoachStart()                         // 处理期有声陪伴：稍后轻声说"我在想"，长任务再说一次
+  const s = sess(S.current)
+  const hint = '\n\n（语音模式：我正在听，请用口语短段落回复、先说结论、不要贴长代码或表格）'
+  sendPrompt(S.current, text + hint, null, s && s.running ? 'steer' : undefined)
+    .catch(() => { if (myTok === VOICE.sendTok && VOICE.state === 'thinking') { vCoachStop(); vSetState('idle') } })
+}
+/* ---- 处理期有声陪伴（仅信号，不长篇）---- */
+function vCoachStart() {
+  vCoachStop()
+  VOICE.coach1 = setTimeout(() => { if (VOICE.state === 'thinking') vSayShort('嗯，我在想') }, 3000)
+  VOICE.coach2 = setTimeout(() => { if (VOICE.state === 'thinking') vSayShort('还在处理，马上好') }, 16000)
+}
+function vCoachStop() {
+  clearTimeout(VOICE.coach1); clearTimeout(VOICE.coach2)
+  VOICE.coach1 = VOICE.coach2 = null
+}
+async function vSayShort(text) {
+  if (VOICE.state !== 'thinking') return
+  try {
+    const r = await fetch('/api/pwa.tts', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, voice: 'stella' }), signal: AbortSignal.timeout(8000),
+    })
+    if (!r.ok) throw new Error('tts ' + r.status)
+    const ab = await r.arrayBuffer()
+    if (VOICE.state !== 'thinking') return
+    const buf = await VAC.decodeAudioData(ab)
+    if (VOICE.state !== 'thinking') return
+    await vWaPlay(buf, 0)
+  } catch (e) {
+    try { ttsSpeak(sess(S.current), { text }) } catch (e2) {}
+  }
+}
+/* ---- 录音（2026-11-15 v2：WebAudio 采 PCM、客户端编 WAV）
+ * iOS MediaRecorder 的 m4a 分片封装不标准，宿主机 afconvert 打不开（真机实测报
+ * Couldn't open input file）；改为 getUserMedia + ScriptProcessor 采 Float32，
+ * 降采样到 16k、编 16-bit PCM WAV 直发——DeepSeek ASR 原生支持，宿主零转码。 */
+const REC_RATE = 16000
+const REC_MAX_S = 118   // 上限 2 分钟：DeepSeek ASR 单次最长 120s，留 2s 余量；到点自动发送
+function vRecStart() {
+  try { vEnsureAudio() } catch (e) {}   // 手势内同步解锁 AudioContext
+  VOICE.pcm = []
+  VOICE.recProc = VOICE.recSource = VOICE.recMute = null
+  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }).then((stream) => {
+    VOICE.recStream = stream
+    try {
+      const src = VAC.createMediaStreamSource(stream)
+      const proc = VAC.createScriptProcessor(2048, 1, 1)
+      const mute = VAC.createGain(); mute.gain.value = 0
+      src.connect(proc); proc.connect(mute); mute.connect(VAC.destination)
+      proc.onaudioprocess = (ev) => { VOICE.pcm.push(new Float32Array(ev.inputBuffer.getChannelData(0))) }
+      VOICE.recSource = src; VOICE.recProc = proc; VOICE.recMute = mute
+    } catch (e) {
+      toast('录音启动失败：' + (e && e.message), true)
+      vRecCleanup()
+    }
+  }, (e) => {
+    toast('麦克风不可用：' + (e && e.name === 'NotAllowedError' ? '浏览器拒绝了麦克风权限' : (e && e.message)), true)
+    if (VOICE.state === 'recording') vSetState('idle')
+  })
+}
+function vRecStop() {   // 同步收尾：拼 PCM → 16k → WAV Blob（无有效音频返回 null）
+  const chunks = VOICE.pcm || []
+  const rate = (VAC && VAC.sampleRate) || 48000
+  vRecCleanup()
+  const total = chunks.reduce((n, a) => n + a.length, 0)
+  if (total < rate * 0.2) return null
+  const merged = new Float32Array(total)
+  let off = 0
+  for (const a of chunks) { merged.set(a, off); off += a.length }
+  const ratio = rate / REC_RATE
+  const outLen = Math.floor(merged.length / ratio)
+  const pcm16 = new Int16Array(outLen)
+  for (let i = 0; i < outLen; i++) {
+    const s0 = Math.floor(i * ratio), s1 = Math.min(merged.length, Math.floor((i + 1) * ratio))
+    let sum = 0
+    for (let j = s0; j < s1; j++) sum += merged[j]
+    const v = Math.max(-1, Math.min(1, sum / Math.max(1, s1 - s0)))
+    pcm16[i] = v < 0 ? v * 0x8000 : v * 0x7fff
+  }
+  return vEncodeWav(pcm16, REC_RATE)
+}
+/* 展示层剥离语音模式提示词：提示只用于向 agent 传达"我在听"的上下文，
+ * 不该出现在用户自己的气泡里（发送的原文仍含提示，协议/日志不受影响）。 */
+function voiceStripHint(t) {
+  return String(t || '')
+    .replace(/\n*（语音模式：我正在听[^）]*）\s*$/, '')
+    .replace(/^（语音模式：我正在听[^）]*）\s*$/, '')
+}
+function vEncodeWav(pcm16, rate) {
+  const dataBytes = pcm16.length * 2
+  const buf = new ArrayBuffer(44 + dataBytes)
+  const dv = new DataView(buf)
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)) }
+  wr(0, 'RIFF'); dv.setUint32(4, 36 + dataBytes, true); wr(8, 'WAVE')
+  wr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true)
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true)
+  wr(36, 'data'); dv.setUint32(40, dataBytes, true)
+  new Int16Array(buf, 44).set(pcm16)
+  return new Blob([buf], { type: 'audio/wav' })
+}
+function vRecDiscard() { VOICE.pcm = []; vRecCleanup() }
+function vRecCleanup() {
+  try { if (VOICE.recProc) { VOICE.recProc.onaudioprocess = null; VOICE.recProc.disconnect() } } catch (e) {}
+  try { if (VOICE.recSource) VOICE.recSource.disconnect() } catch (e) {}
+  try { if (VOICE.recMute) VOICE.recMute.disconnect() } catch (e) {}
+  try { if (VOICE.recStream) VOICE.recStream.getTracks().forEach((t) => t.stop()) } catch (e) {}
+  VOICE.recProc = null; VOICE.recSource = null; VOICE.recMute = null; VOICE.recStream = null; VOICE.pcm = []
+}
+/* ---- 播报：改写 → 分段 → 云端 TTS（audio 元件，锁屏可续）→ 降级 Web Speech ---- */
+async function voiceSpeak(s, item) {
+  const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 24))
+  VOICE.lastSpokenKey = key; VOICE.lastSpokenItem = item
+  vElStop(); vRevokePref(); VOICE.segMode = null
+  VOICE.userPaused = false; VOICE.curBuf = null; VOICE.curSeg = null; VOICE.pausedOffset = 0
+  vSetState('speaking')   // 先占状态；下面拿稿期间 word 显示"整理口语稿…"
+  vFlash('整理口语稿…')
+  let script = VOICE.scriptCache.get(key)
+  if (script === undefined) {
+    script = null
+    try {
+      const r = await fetch('/api/pwa.tts-script', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: item.text }),
+        signal: AbortSignal.timeout(45000),
+      })
+      if (r.ok) script = (await r.text()).trim()
+      else if (r.status === 401) markAuthExpired()
+    } catch (e) { /* 改写失败 → 本地规则兜底 */ }
+    if (!script) script = ttsPrepare(item.text)
+    VOICE.scriptCache.set(key, script)
+    if (VOICE.scriptCache.size > 60) VOICE.scriptCache.delete(VOICE.scriptCache.keys().next().value)
+  }
+  if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return   // 期间被打断/切走
+  VOICE.paras = script.split(/\n+/).map((t) => t.trim()).filter(Boolean)
+    .flatMap((p) => (p.length > 260 ? p.replace(/([。！？；])/g, '$1\u0001').split('\u0001').map((x) => x.trim()).filter(Boolean) : [p]))
+    .slice(0, 40)
+  VOICE.pi = 0; VOICE.engine = 'cloud'
+  VOICE.pref = VOICE.paras.map((p) => vFetchPara(p))   // 并行预取：段间零缝隙（真机反馈断断续续的根因是逐段串行请求）
+  vTick()
+  vPlayNext(key)
+}
+function vPlayNext(key) {
+  if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+  if (VOICE.pi >= VOICE.paras.length) {   // 全部播完：交给用户
+    vDone(); vibrate([12, 80, 12])
+    VOICE.paras = []; VOICE.pi = 0
+    vSetState('idle')
+    return
+  }
+  Promise.resolve(VOICE.pref && VOICE.pref[VOICE.pi]).then((seg) => {
+    if (!seg) { vFallbackSystem(key); return }
+    if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+    VOICE.curSeg = seg
+    VOICE.pausedOffset = 0
+    vRunSeg(key, 0)
+  })
+}
+function vSysWatch(key) {
+  clearInterval(VOICE.sysPoll)
+  VOICE.sysPoll = setInterval(() => {
+    if (VOICE.engine !== 'system' || VOICE.lastSpokenKey !== key) { clearInterval(VOICE.sysPoll); return }
+    if (!TTS.on) {   // ttsPlayIdx 播完会自己 ttsStop
+      clearInterval(VOICE.sysPoll)
+      if (VOICE.state === 'speaking') { vDone(); vibrate([12, 80, 12]); VOICE.paras = []; VOICE.pi = 0; vSetState('idle') }
+    }
+  }, 250)
+}
+/* ---- 播放层：默认 Web Audio（已解锁、无手势限制）；加速时改用 <audio> 元素 ----
+ * 原因（真机反馈）：AudioBufferSource.playbackRate 是重采样，1.5×/2× 会连音高一起
+ * 拉高（声音变了）；HTMLMediaElement 的 preservesPitch 默认保调，只提速不变调。
+ * <audio> 元素先用静音片段在手势里解锁；若被 iOS 拒绝（play() reject），
+ * 再退回 Web Audio（此时才接受变调）。 */
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA='
+function vUnlockEl() {
+  try {
+    if (!VOICE.el) {
+      const el = new Audio()
+      el.preload = 'auto'
+      el.setAttribute('playsinline', '')
+      VOICE.el = el
+    }
+    if (!VOICE.elReady) {
+      VOICE.el.src = SILENT_WAV
+      const p = VOICE.el.play()
+      if (p && p.then) p.then(() => { VOICE.elReady = true; try { VOICE.el.pause() } catch (e) {} }).catch(() => {})
+    }
+  } catch (e) {}
+}
+function vWaStop() {
+  const r = VOICE.wResolve; VOICE.wResolve = null
+  try { if (VOICE.wSrc) { VOICE.wSrc.onended = null; try { VOICE.wSrc.stop() } catch (e) {} VOICE.wSrc.disconnect() } } catch (e) {}
+  VOICE.wSrc = null; VOICE.wPlaying = false
+  if (r) r(false)
+}
+function vWaPlay(buf, from) {
+  vWaStop()
+  if (!VAC || !buf) return Promise.resolve(false)
+  try { VAC.resume().catch(() => {}) } catch (e) {}
+  const src = VAC.createBufferSource()
+  src.buffer = buf
+  src.playbackRate.value = 1    // 音高保护：WebAudio 不做变速（变速交给 <audio> 元素）
+  src.connect(VAC.destination)
+  VOICE.wSrc = src
+  VOICE.wStartAt = VAC.currentTime
+  VOICE.wOffset = from || 0
+  VOICE.wPlaying = true
+  try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
+  return new Promise((resolve) => {
+    VOICE.wResolve = resolve
+    src.onended = () => {
+      if (VOICE.wResolve === resolve) VOICE.wResolve = null
+      if (VOICE.wSrc === src) { VOICE.wSrc = null; VOICE.wPlaying = false }
+      resolve(true)
+    }
+  })
+}
+function vWaElapsed() {
+  return (VOICE.wOffset || 0) + (VOICE.wPlaying && VAC ? (VAC.currentTime - VOICE.wStartAt) : 0)
+}
+function vElStop() {
+  const r = VOICE.elResolve; VOICE.elResolve = null
+  try { if (VOICE.el) { VOICE.el.onended = null; VOICE.el.pause() } } catch (e) {}
+  VOICE.elActive = false
+  if (r) r(false)
+}
+function vElPlay(seg, from) {
+  const el = VOICE.el
+  if (!el || !VOICE.elReady || !seg || !seg.url) return Promise.resolve(false)
+  try {
+    el.onended = null
+    if (el.src !== seg.url) el.src = seg.url
+    el.preservesPitch = true
+    try { el.webkitPreservesPitch = true } catch (e) {}
+    el.playbackRate = TTS.rate
+    try { el.currentTime = from || 0 } catch (e) {}
+    VOICE.elActive = true
+    const p = el.play()
+    return new Promise((resolve) => {
+      const done = (ok) => {
+        if (VOICE.elResolve === done) VOICE.elResolve = null
+        VOICE.elActive = false
+        el.onended = null
+        resolve(ok)
+      }
+      VOICE.elResolve = done
+      el.onended = () => done(true)
+      if (p && p.catch) p.catch(() => done(false))
+    })
+  } catch (e) { return Promise.resolve(false) }
+}
+function vPlaySeg(seg, from) {
+  if (TTS.rate !== 1 && VOICE.elReady) {
+    return vElPlay(seg, from).then((ok) => {
+      if (ok) { VOICE.segMode = 'el'; return true }
+      return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+    })
+  }
+  return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+}
+function vRunSeg(key, from) {
+  const seg = VOICE.curSeg
+  if (!seg) return
+  vPlaySeg(seg, from).then((ok) => {
+    if (!ok) return
+    if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+    VOICE.pi++
+    vSyncDeck()
+    vPlayNext(key)
+  })
+}
+function vFetchPara(text) {   // 取音频并解码（并行预取用）；失败返回 null
+  return fetch('/api/pwa.tts', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, voice: 'stella' }),
+    signal: AbortSignal.timeout(30000),
+  }).then(async (r) => {
+    if (!r.ok) return null
+    const blob = await r.blob()
+    const ab = await blob.arrayBuffer()
+    let buf = null
+    try { buf = await VAC.decodeAudioData(ab.slice(0)) } catch (e) { buf = null }
+    if (!buf) return null
+    return { buf, url: URL.createObjectURL(blob) }
+  }).catch(() => null)
+}
+function vRevokePref() {
+  try {
+    (VOICE.pref || []).forEach((p) => {
+      if (p && p.then) p.then((seg) => { if (seg && seg.url) URL.revokeObjectURL(seg.url) }, () => {})
+    })
+  } catch (e) {}
+  VOICE.pref = null
+}
+/* 云端合成不可用（无 key / 内容审核 / 解码失败）→ 系统语音引擎兜底剩余文本 */
+function vFallbackSystem(key) {
+  if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+  VOICE.engine = 'system'
+  ttsSpeak(sess(S.current), { text: VOICE.paras.slice(VOICE.pi).join('\\n') })
+  vSetState('speaking')
+  vSysWatch(key)
+}
+function vTogglePause() {
+  if (VOICE.engine === 'system') { ttsPauseResume(); vSetState('speaking'); return }
+  if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
+    if (VOICE.el.paused) { try { VOICE.el.play() } catch (e) {} VOICE.userPaused = false; vResumeCue() }
+    else { try { VOICE.el.pause() } catch (e) {} VOICE.userPaused = true; vPauseCue() }
+    vSetState('speaking')
+    return
+  }
+  if (VOICE.wPlaying) {
+    VOICE.pausedOffset = vWaElapsed()
+    VOICE.userPaused = true
+    vWaStop()
+    vPauseCue()
+  } else if (VOICE.curSeg) {
+    VOICE.userPaused = false
+    vResumeCue()
+    vRunSeg(VOICE.lastSpokenKey, VOICE.pausedOffset || 0)
+  }
+  vSetState('speaking')
+}
+function vReplay() {
+  if (VOICE.state === 'speaking') {
+    if (VOICE.engine === 'system') {
+      ttsStop(true)
+      ttsSpeak(sess(S.current), { text: VOICE.paras.slice(VOICE.pi).join('\\n') })
+      return
+    }
+    if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
+      VOICE.userPaused = false
+      try { VOICE.el.currentTime = 0; VOICE.el.play() } catch (e) {}
+      return
+    }
+    if (VOICE.curSeg) {
+      VOICE.userPaused = false
+      vRunSeg(VOICE.lastSpokenKey, 0)
+    }
+    return
+  }
+  if (VOICE.state === 'idle' && VOICE.lastSpokenItem && VOICE.lastSpokenKey) {
+    const s = sess(S.current)
+    if (s) voiceSpeak(s, VOICE.lastSpokenItem)   // 播完状态：重听最近一条完整回复
+  }
+}
+/* ---- 绑定（DOM 在 shell 里静态存在） ---- */
+function voiceBind() {
+  const vt = $('#vm-text')
+  const vv = $('#vm-voice')
+  if (vt) vt.onclick = () => {
+    const id = S.current
+    if (!id) return
+    if (!voiceMode(id)) return
+    voiceSetMode(id, false)
+    voiceStopAll()
+    const s2 = S.sessions.get(id)
+    if (s2) refreshChatChrome(s2)
+    vibrate(8); vTick()
+  }
+  if (vv) vv.onclick = () => {
+    const id = S.current
+    if (!id) return
+    const s2 = S.sessions.get(id)
+    if (!voiceMode(id)) {
+      voiceSetMode(id, true)
+      vUnlock(); vUnlockEl(); vTick(); ttsWarm()
+      if (s2) refreshChatChrome(s2)
+      toast(micAvailable() ? '语音模式：按住说话，松手发送' : '语音模式（麦克风需 HTTPS 访问）')
+    }
+  }
+  const zone = $('#v-zone')
+  if (!zone) return
+  zone.addEventListener('pointerdown', vOnDown)
+  zone.addEventListener('pointermove', vOnMove)
+  zone.addEventListener('pointerup', vOnUp)
+  zone.addEventListener('pointercancel', vOnUp)
+  zone.addEventListener('contextmenu', (e) => e.preventDefault())
+  const pp = $('#v-pp'); if (pp) pp.onclick = () => { if (VOICE.state === 'speaking') vTogglePause() }
+  const rp = $('#v-replay'); if (rp) rp.onclick = () => vReplay()
+  const rt = $('#v-rate')
+  const fmtR = (r) => (r % 1 ? String(r).replace(/0$/, '') : String(r)) + '×'
+  const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtR(TTS.rate)   // 语速是全局的：进语音模式先对齐显示
+  if (rt) rt.onclick = () => {
+    ttsCycleRate()
+    if (rv) rv.textContent = fmtR(TTS.rate)
+    vUnlockEl()
+    if (VOICE.state === 'speaking') {
+      if (VOICE.segMode === 'el' && VOICE.el) { try { VOICE.el.playbackRate = TTS.rate } catch (e) {} }
+      else if (VOICE.segMode === 'wa' && TTS.rate !== 1 && VOICE.elReady && VOICE.curSeg) {
+        // 正段从 WebAudio 切到元素播放，保持音色、从当前位置续播
+        const pos = vWaElapsed()
+        VOICE.segMode = 'el'
+        vElPlay(VOICE.curSeg, pos).then((ok) => {
+          if (!ok) return
+          if (VOICE.lastSpokenKey && VOICE.state === 'speaking') { VOICE.pi++; vSyncDeck(); vPlayNext(VOICE.lastSpokenKey) }
+        })
+      }
+    }
+  }
+  setInterval(() => {
+    const t = $('#v-rec-time')
+    if (t && VOICE.state === 'recording') {
+      const sec = Math.max(0, Math.floor((Date.now() - VOICE.holdT0) / 1000))
+      const mm = Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0')
+      t.textContent = mm + ' / 2:00'   // 上限可见：DeepSeek ASR 单次最长 120 秒
+      if (sec >= REC_MAX_S && !VOICE.autoStopping) {   // 到 118 秒自动停并发出去，绝不丢
+        VOICE.autoStopping = true
+        vFlash('到 2 分钟上限 · 自动发送')
+        vSubmitRecording().finally(() => { VOICE.autoStopping = false })
+      }
+    }
+  }, 200)
+}
+
 window.addEventListener('hashchange', route)
+voiceBind()   // 语音模式（对讲机）手势与甲板控制绑定
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return
   loadBase()
@@ -7736,5 +8472,5 @@ document.addEventListener('keydown', (e) => {
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
-try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat } } catch (e) {}
+try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat, VOICE, voiceSpeak, voiceSetMode, vTranscribeAndSend, vSubmitRecording, vFetchPara } } catch (e) {}
 })()
