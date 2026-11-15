@@ -7188,6 +7188,7 @@ function buildShell() {
         <div class="v-word" id="v-word">就绪</div>
         <div class="v-hint" id="v-hint">按住说话 · 松手发送</div>
       </div>
+      <div class="v-ver" aria-hidden="true">v1.19 · 状态色</div>
       <nav class="v-deck" aria-label="播报控制">
         <button class="v-cell" id="v-pp" type="button" disabled aria-label="暂停播报">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="5" width="3.6" height="14" rx="1.8"/><rect x="13.4" y="5" width="3.6" height="14" rx="1.8"/></svg>

@@ -1795,21 +1795,24 @@ html.light .v-cell:not(:disabled):active { background: rgba(15,23,42,.06); }
 /* ============ 语音模式：整屏状态色（用户指定：用颜色表达"正在做什么"，替代口播"我在想"） ============ */
 .v-amb { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .5s ease; }
 .v-amb.v-a-idle { background: radial-gradient(120% 80% at 50% 0%, rgba(106,166,255,.05), transparent 70%); }
-.v-amb.v-a-rec { background: radial-gradient(120% 80% at 50% 0%, rgba(255,69,58,.14), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(255,69,58,.08), transparent 65%); }
-.v-amb.v-a-asr { background: radial-gradient(120% 80% at 50% 0%, rgba(191,90,242,.13), transparent 70%); }
-.v-amb.v-a-work { background: radial-gradient(120% 80% at 50% 0%, rgba(255,159,10,.11), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(255,159,10,.06), transparent 65%); }
-.v-amb.v-a-speak { background: radial-gradient(120% 80% at 50% 0%, rgba(59,130,246,.14), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(59,130,246,.07), transparent 65%); }
+.v-amb.v-a-rec { background: radial-gradient(130% 90% at 50% 0%, rgba(255,69,58,.24), rgba(255,69,58,.06) 55%, transparent 78%), radial-gradient(110% 70% at 50% 100%, rgba(255,69,58,.14), transparent 68%); }
+.v-amb.v-a-asr { background: radial-gradient(130% 90% at 50% 0%, rgba(191,90,242,.22), rgba(191,90,242,.06) 55%, transparent 78%); }
+.v-amb.v-a-work { background: radial-gradient(130% 90% at 50% 0%, rgba(255,159,10,.22), rgba(255,159,10,.07) 55%, transparent 78%), radial-gradient(110% 70% at 50% 100%, rgba(255,159,10,.12), transparent 68%); }
+.v-amb.v-a-speak { background: radial-gradient(130% 90% at 50% 0%, rgba(59,130,246,.24), rgba(59,130,246,.07) 55%, transparent 78%), radial-gradient(110% 70% at 50% 100%, rgba(59,130,246,.13), transparent 68%); }
 .voice-view[data-state=idle] .v-a-idle { opacity: 1; }
 .voice-view[data-state=recording] .v-a-rec { opacity: 1; }
 .voice-view[data-state=asr] .v-a-asr { opacity: 1; }
 .voice-view[data-state=thinking] .v-a-work { opacity: 1; }
 .voice-view[data-state=speaking] .v-a-speak { opacity: 1; }
 html.light .v-amb.v-a-idle { background: radial-gradient(120% 80% at 50% 0%, rgba(37,99,235,.045), transparent 70%); }
-html.light .v-amb.v-a-rec { background: radial-gradient(120% 80% at 50% 0%, rgba(193,18,31,.10), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(193,18,31,.06), transparent 65%); }
-html.light .v-amb.v-a-asr { background: radial-gradient(120% 80% at 50% 0%, rgba(109,40,217,.10), transparent 70%); }
-html.light .v-amb.v-a-work { background: radial-gradient(120% 80% at 50% 0%, rgba(154,74,6,.13), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(154,74,6,.06), transparent 65%); }
-html.light .v-amb.v-a-speak { background: radial-gradient(120% 80% at 50% 0%, rgba(37,99,235,.10), transparent 70%), radial-gradient(100% 60% at 50% 100%, rgba(37,99,235,.05), transparent 65%); }
+html.light .v-amb.v-a-rec { background: radial-gradient(130% 90% at 50% 0%, rgba(220,38,38,.22), rgba(220,38,38,.07) 55%, transparent 80%), radial-gradient(110% 70% at 50% 100%, rgba(220,38,38,.12), transparent 70%); }
+html.light .v-amb.v-a-asr { background: radial-gradient(130% 90% at 50% 0%, rgba(109,40,217,.20), rgba(109,40,217,.07) 55%, transparent 80%), radial-gradient(110% 70% at 50% 100%, rgba(109,40,217,.10), transparent 70%); }
+html.light .v-amb.v-a-work { background: radial-gradient(130% 90% at 50% 0%, rgba(180,83,9,.24), rgba(180,83,9,.08) 55%, transparent 80%), radial-gradient(110% 70% at 50% 100%, rgba(180,83,9,.12), transparent 70%); }
+html.light .v-amb.v-a-speak { background: radial-gradient(130% 90% at 50% 0%, rgba(37,99,235,.22), rgba(37,99,235,.07) 55%, transparent 80%), radial-gradient(110% 70% at 50% 100%, rgba(37,99,235,.11), transparent 70%); }
 .voice-view > .v-cancel, .voice-view > .v-zone, .voice-view > .v-deck, .voice-view > .vv-foot { position: relative; z-index: 1; }
 /* 思考/干活=琥珀色（与识别紫、播报蓝区分开） */
 .voice-view[data-state=thinking] .v-word { color: #ffb84d; }
 html.light .voice-view[data-state=thinking] .v-word { color: #9a4a06; }
+
+/* 语音模式构建标记：确认手机跑的是哪一版（排查缓存用） */
+.v-ver { position: absolute; right: 10px; bottom: 6px; z-index: 2; font-size: 9px; letter-spacing: .5px; color: var(--text-3); opacity: .5; pointer-events: none; }
