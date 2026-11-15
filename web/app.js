@@ -8021,6 +8021,7 @@ async function vTranscribeAndSend(blob) {
   if (myTok !== VOICE.sendTok) return
   if (!text) { VOICE.retryBlob = blob; vSetState('idle'); vFlash('没听清 · 轻点重试或再说一次', true); return }
   VOICE.retryBlob = null
+  if (VOICE.lastLevel && VOICE.lastLevel < 0.01) vFlash('声音偏小 · 已自动放大')
   vSetState('thinking')                 // 保持"思考中"直到 turn/end 触发播报或用户再按
   vibrate([18, 70, 18]); vRoger()
   const s = sess(S.current)
@@ -8038,15 +8039,18 @@ function vRecStart() {
   try { vEnsureAudio() } catch (e) {}   // 手势内同步解锁 AudioContext
   VOICE.pcm = []
   VOICE.recProc = VOICE.recSource = VOICE.recMute = null
-  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }).then((stream) => {
+  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }).then((stream) => {
     VOICE.recStream = stream
     try {
       const src = VAC.createMediaStreamSource(stream)
+      // 100Hz 高通：风声是低频隆隆，先切掉，避免它吃掉动态范围/顶爆麦克风
+      const hp = VAC.createBiquadFilter()
+      hp.type = 'highpass'; hp.frequency.value = 100; hp.Q.value = 0.7
       const proc = VAC.createScriptProcessor(2048, 1, 1)
       const mute = VAC.createGain(); mute.gain.value = 0
-      src.connect(proc); proc.connect(mute); mute.connect(VAC.destination)
+      src.connect(hp); hp.connect(proc); proc.connect(mute); mute.connect(VAC.destination)
       proc.onaudioprocess = (ev) => { VOICE.pcm.push(new Float32Array(ev.inputBuffer.getChannelData(0))) }
-      VOICE.recSource = src; VOICE.recProc = proc; VOICE.recMute = mute
+      VOICE.recSource = src; VOICE.recHp = hp; VOICE.recProc = proc; VOICE.recMute = mute
     } catch (e) {
       toast('录音启动失败：' + (e && e.message), true)
       vRecCleanup()
@@ -8067,15 +8071,42 @@ function vRecStop() {   // 同步收尾：拼 PCM → 16k → WAV Blob（无有�
   for (const a of chunks) { merged.set(a, off); off += a.length }
   const ratio = rate / REC_RATE
   const outLen = Math.floor(merged.length / ratio)
-  const pcm16 = new Int16Array(outLen)
+  const mono = new Float32Array(outLen)
   for (let i = 0; i < outLen; i++) {
     const s0 = Math.floor(i * ratio), s1 = Math.min(merged.length, Math.floor((i + 1) * ratio))
     let sum = 0
     for (let j = s0; j < s1; j++) sum += merged[j]
-    const v = Math.max(-1, Math.min(1, sum / Math.max(1, s1 - s0)))
+    mono[i] = sum / Math.max(1, s1 - s0)
+  }
+  // 电平归一：真机反馈风大/离得远时识别不准——统一到 ASR 友好的电平（不改变音色）
+  const gain = vAutoGain(mono, REC_RATE)
+  const pcm16 = new Int16Array(outLen)
+  for (let i = 0; i < outLen; i++) {
+    const v = Math.max(-0.98, Math.min(0.98, mono[i] * gain))
     pcm16[i] = v < 0 ? v * 0x8000 : v * 0x7fff
   }
   return vEncodeWav(pcm16, REC_RATE)
+}
+/* 录音电平归一：以 20ms 帧 RMS 的 90 分位（近似语音主体电平）为基准放大到 0.12，
+ * 增益限制在 0.5~8 倍，最后做峰值限制。对干净语音几乎无感，对离得远/风大能明显
+ * 提升识别率（不会改变音色，只调音量）。 */
+function vAutoGain(mono, rate) {
+  try {
+    const N = Math.max(1, Math.round(rate * 0.02))
+    const frames = Math.floor(mono.length / N)
+    if (!frames) return 1
+    const fr = new Float32Array(frames)
+    for (let f = 0; f < frames; f++) {
+      let x = 0
+      for (let i = f * N; i < (f + 1) * N; i++) x += mono[i] * mono[i]
+      fr[f] = Math.sqrt(x / N)
+    }
+    const sorted = Array.from(fr).sort((a, b) => a - b)
+    const p90 = sorted[Math.max(0, Math.floor(sorted.length * 0.9))] || 0
+    VOICE.lastLevel = p90
+    if (!p90 || p90 < 1e-4) return 1
+    return Math.max(0.5, Math.min(8, 0.12 / p90))
+  } catch (e) { return 1 }
 }
 /* 展示层剥离语音模式提示词：提示只用于向 agent 传达"我在听"的上下文，
  * 不该出现在用户自己的气泡里（发送的原文仍含提示，协议/日志不受影响）。 */
