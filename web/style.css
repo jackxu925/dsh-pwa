@@ -1431,6 +1431,14 @@ html.light .mode-chip.warn { color:#9a4a06; }
 .ro-composer.one-shot { border-style:dashed; }
 .ro-composer b { font-size:13px; font-weight:650; color:var(--text); }
 .ro-composer span { font-size:12px; color:var(--text-3); line-height:1.5; }
+.ro-open-parent {
+  align-self:flex-start; margin-top:6px; padding:7px 12px; min-height:36px;
+  border:1px solid rgba(var(--mint-rgb), .3); border-radius:10px;
+  background:rgba(var(--mint-rgb), .1); color:var(--mint);
+  font-family:var(--font); font-size:12px; font-weight:650; cursor:pointer;
+}
+.ro-open-parent:active { transform:scale(.97); }
+html.light .ro-open-parent { color:#0f766e; }
 
 /* ---- 队友消息气泡（agent-message relay） ---- */
 .msg.peer { align-self:flex-start; max-width:min(88%, 660px); display:flex; flex-direction:column; gap:6px; animation:msgin .2s var(--ease-out); }

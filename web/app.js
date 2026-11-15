@@ -478,16 +478,22 @@ function subagentModeLabel(mode) {
   if (mode === 'unknown') return '模式未知'
   return '子会话'
 }
-/* 子会话可继续则正常输入；一次性 / 模式未知只读 */
+/* 子会话可继续则正常输入；一次性 / 模式未知 / 上级离线只读。
+ * 注意：子会话（sub-agent）与 Agent 团队是两套东西——团队是 Lead + 队友共享任务板；
+ * 子会话是某个会话派生出来的执行会话。用户第一次看到这句提示时经常混淆，正文里说清楚。 */
 function subagentReadonly(s) {
   if (!s || !s.subagent) return null
   const mode = subagentModeOf(s)
-  if (mode === 'one-shot') return { mode, title: '一次性子会话只读', body: '可以查看完整执行记录，不能继续输入。' }
-  if (mode === 'external' || mode === 'unknown') return { mode: mode || 'unknown', title: '这个子会话不能继续', body: '宿主没有可用的可继续地址；完整记录仍可查看。' }
+  if (mode === 'one-shot') return { mode, title: '一次性子会话只读', body: '这是 sub-agent 子会话（不是 Agent 团队）。可以查看完整执行记录，不能继续输入。' }
+  if (mode === 'external' || mode === 'unknown') return { mode: mode || 'unknown', title: '这个子会话不能继续', body: '这是 sub-agent 子会话；宿主没有可用的可继续地址，完整记录仍可查看。' }
   // 可继续子会话要求直接上级 Agent 在线（桌面同语义）：上级离线时历史可看，输入不可用
   const parent = s.parentSessionId ? S.sessions.get(s.parentSessionId) : null
   if (mode === 'continuable' && parent && parent.agentAvailable === false && !s.running) {
-    return { mode, title: '上级会话未在线', body: '可继续子会话需要直接上级在线；先在上级会话发一条消息，再回来即可继续输入。' }
+    return {
+      mode, title: '子会话需要上级在线',
+      body: '这是 sub-agent 子会话（不是 Agent 团队）。可继续子会话需要直接上级在线；先打开上级会话发一条消息，再回来继续。',
+      parentId: s.parentSessionId,
+    }
   }
   return null
 }
@@ -3073,9 +3079,15 @@ function renderReadonlyComposer(s) {
   box.style.display = ro ? '' : 'none'
   if (composer) composer.style.display = ro ? 'none' : ''
   box.classList.toggle('one-shot', !!ro && ro.mode === 'one-shot')
-  if (ro) {
-    $('#ro-title').textContent = ro.title
-    $('#ro-body').textContent = ro.body
+  box.textContent = ''
+  if (!ro) return
+  box.appendChild(el('b', null, ro.title))
+  box.appendChild(el('span', null, ro.body))
+  if (ro.parentId) {
+    const btn = el('button', 'ro-open-parent', '打开上级会话')
+    btn.type = 'button'
+    btn.onclick = () => { if (S.current !== ro.parentId) { vibrate(8); location.hash = '#/s/' + ro.parentId } }
+    box.appendChild(btn)
   }
 }
 function openTeamSheet(s) {
@@ -3351,7 +3363,7 @@ function renderKidsSheet() {
   current.appendChild(avNode(chatTitleOf(s), 30, 'l'))
   const cm = el('span', 'kid-mid')
   cm.appendChild(el('b', null, chatTitleOf(s)))
-  cm.appendChild(el('small', null, subagentModeLabel(subagentModeOf(s)) + ' · 当前会话'))
+  cm.appendChild(el('small', null, (s.subagent ? subagentModeLabel(subagentModeOf(s)) : '上级会话') + ' · 当前会话'))
   current.appendChild(cm)
   current.appendChild(el('span', 'mini-chip', '这里'))
   tree.appendChild(current)
@@ -3374,7 +3386,7 @@ function renderKidsSheet() {
   }
   if (cat.length) body.appendChild(tree)
   else body.appendChild(el('div', 'kids-empty', '这个会话没有下级子会话。'))
-  body.appendChild(el('p', 'team-note', '普通会话列表不铺开子代理会话；成员会话里用谱系按需展开。一次性子会话只能查看历史，不能继续输入。'))
+  body.appendChild(el('p', 'team-note', '子会话（sub-agent）是某个会话派生出的执行会话；Agent 团队则是 Lead + 队友共享任务板，两者不是一回事。普通会话列表不铺开子会话；一次性子会话只能查看历史，不能继续输入。'))
 }
 function openChildChat(id, parentId, mode, label) {
   if (!id) return
@@ -3570,6 +3582,18 @@ async function loadBase() {
   }
 }
 /* 历史加载：打开（或重开）follow 流，等首帧 snapshot 折叠完成 */
+/* 打开子会话时补一次最新 list：parent 的 agentAvailable 可能是打开 parent 之前的旧快照，
+ * 旧快照会把「上级其实还在线」误判成只读。只更新 availability，不重排列表。 */
+async function refreshParentAvailability(s) {
+  if (!s || !s.subagent || !s.parentSessionId) return
+  try {
+    const list = await rpc('session/list', { _request: {} })
+    for (const item of list.items || []) {
+      const x = S.sessions.get(item.sessionId)
+      if (x) x.agentAvailable = !!item.agentAvailable
+    }
+  } catch (e) { /* 拿不到就沿用现有快照，不挡打开 */ }
+}
 async function loadHistory(s) {
   // 子代理会话且父地址/模式未知：先刷一次列表（父目录里带 mode），否则 follow 必报 agent-busy / mode mismatch
   if (s.subagent && (!s.parentSessionId || !s.subagentMode)) await loadBase().catch(() => {})
@@ -3977,7 +4001,7 @@ const Mux = {
 function followAddress(id) {
   const s = S.sessions.get(id)
   if (s && s.subagent && s.parentSessionId) {
-    return { kind: 'subagent', parentSessionId: s.parentSessionId, childSessionId: id, mode: subagentModeOf(s) || 'continuable' }
+    return { kind: 'subagent', parentSessionId: s.parentSessionId, childSessionId: id, mode: subagentModeOf(s) || 'unknown' }
   }
   return { kind: 'session', sessionId: id }
 }
@@ -4277,6 +4301,9 @@ async function openSession(id, force) {
   const s = sess(id)
   S.current = id
   S.todoMode = false
+  // 冷启动/深链：先等 session/list 落地，子会话的 parentSessionId / mode 只能从这里知道；
+  // 否则会把子会话当普通会话 follow，宿主回 agent-busy（看起来就像“打开子会话报错”）。
+  if (!S.listLoaded) await loadBase().catch(() => {})
 
   $('#chat-title').textContent = chatTitleOf(s)
   showView('chat')
@@ -4288,8 +4315,23 @@ async function openSession(id, force) {
   if (!s.loaded || force) {
     sc.appendChild(skeletonNode())
     try { await loadHistory(s) } catch (e) {
+      const em = String((e && e.message) || '')
+      // 深链时元数据还没到：补一次 list 后按真实 subagent 地址重试，而不是把 agent-busy 直接甩给用户
+      if (!s.subagent && !s._subagentRetry && /subagent|agent-busy|durable parent/i.test(em)) {
+        s._subagentRetry = true
+        await loadBase().catch(() => {})
+        if (s.subagent) return openSession(id, true)
+      }
+      // 目录里的 mode 过期（缓存行没带 subagent 键）时，重新读一次父投影再试
+      if (s.subagent && !s._modeRetry && /mode does not match/i.test(em)) {
+        s._modeRetry = true
+        const p = s.parentSessionId && S.sessions.get(s.parentSessionId)
+        if (p) await refreshSessionProjections(p).catch(() => {})
+        s.subagentMode = null
+        return openSession(id, true)
+      }
       sc.textContent = ''
-      const d = el('div', 'empty-state', '加载失败：' + e.message)
+      const d = el('div', 'empty-state', '加载失败：' + em)
       d.appendChild(document.createElement('br'))
       const retry = el('button', 'retry', '重试')
       retry.onclick = () => openSession(id, true)
@@ -4302,6 +4344,7 @@ async function openSession(id, force) {
     Mux.setFollow(id)
     markSeenNow(s)   // 修复：已加载过的会话再次打开也要记已读——否则新事件带来的蓝点点进去也不消
   }
+  if (s.subagent) await refreshParentAvailability(s)
   renderChat(s, true)
   refreshChatChrome(s)
   restoreDraft(id)
@@ -6080,6 +6123,19 @@ function renderSheet(s) {
       menuRow(talk, { icon: 'team', name: '团队', value: teamSt.total + ' 名成员 · ' + teamSt.running + ' 运行中', onClick: () => { closeSheet(); openTeamSheet(s) } })
     }
   }
+  // 普通会话也能看到自己派生的子会话；团队成员的目录已经由「团队」面板覆盖，
+  // 只有 Lead 还派生了非队友的一次性子会话时才补一行，避免重复入口。
+  if (Array.isArray(s.agentCatalog) && s.agentCatalog.length) {
+    const teamIds = new Set(hasTeamView(s) ? teamOf(s).members.map((m) => m.id) : [])
+    const hasOtherChild = s.agentCatalog.some((entry) => entry && entry.id && !teamIds.has(entry.id))
+    if (!hasTeamView(s) || hasOtherChild) {
+      menuRow(talk, {
+        icon: 'robot', name: '子会话', value: s.agentCatalog.length + ' 个',
+        desc: 'sub-agent · 不是 Agent 团队',
+        onClick: () => { closeSheet(); openKidsSheet(s) },
+      })
+    }
+  }
   if (!s.subagent) {
     menuRow(talk, { icon: 'brain', name: '模型', value: modelLabel(s), onClick: () => openModelPanel(s) })
     const perms = s.permissions
@@ -6180,7 +6236,7 @@ function renderSheet(s) {
     },
   })
   }
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.0'))
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.1'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -7087,9 +7143,7 @@ function buildShell() {
       <div class="q-strip" id="q-strip"></div>
       <div class="attach-strip" id="attach-strip"></div>
       <div class="quote-strip" id="quote-strip"></div>
-      <div class="ro-composer" id="ro-composer" style="display:none">
-        <b id="ro-title"></b><span id="ro-body"></span>
-      </div>
+      <div class="ro-composer" id="ro-composer" style="display:none"></div>
       <div class="composer">
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
         <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
