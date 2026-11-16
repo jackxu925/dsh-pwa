@@ -1482,6 +1482,7 @@ function renderQuoteStrip() {
     chip.onclick = () => { vibrate(8); openQuoteSheet(S.current, i) }
     strip.appendChild(chip)
   })
+  syncSendButton()
 }
 /* 注解面板 */
 let quoteEdit = { sid: null, i: 0 }
@@ -4364,6 +4365,7 @@ async function openSession(id, force) {
   renderChat(s, true)
   refreshChatChrome(s)
   restoreDraft(id)
+  syncSendButton(s)   // 草稿可能是刚恢复的：有字就恢复发送键
   loadFb(s)   // 消息评价表（👍/👎）：打开会话时拉一次，静默失败
 }
 function reloadCurrent() {
@@ -4371,6 +4373,23 @@ function reloadCurrent() {
   if (!S.current) return
   const s = sess(S.current)
   loadHistory(s).then(() => renderChat(s)).catch(() => {})
+}
+/* 发送键的可用状态：连接断开 / 会话只读，以及「AI 正在回复且没有可发内容」时禁用。
+   运行中一旦输入文字、附上图片或引用消息就恢复——排队 / 插话能力不变；
+   用户反馈的是 AI 回复期间空输入框旁那颗钮仍和空闲时一样亮、看不出不能点。 */
+function composerHasContent() {
+  const input = $('#chat-input')
+  const text = input ? input.textContent.trim() : ''
+  const images = document.querySelectorAll('#attach-strip .attach-thumb').length
+  const quotes = S.current ? quotesOf(S.current).length : 0
+  return !!(text || images || quotes)
+}
+function syncSendButton(s) {
+  const send = $('#send-btn')
+  if (!send) return
+  const cur = s || (S.current ? sess(S.current) : null)
+  const emptyWhileRunning = !!(cur && cur.running) && !composerHasContent()
+  send.disabled = S.connState !== 'online' || !!subagentReadonly(cur) || emptyWhileRunning
 }
 function refreshChatChrome(s) {
   renderGoalBanner(s)   // 目标横幅：进会话与状态刷新时同步
@@ -4381,8 +4400,7 @@ function refreshChatChrome(s) {
     input.dataset.ph = off ? '连接已断开…' : s.running ? '追加指令（steer）…' : '发消息…'
     input.classList.toggle('off', off)
   }
-  const send = $('#send-btn')
-  if (send) send.disabled = off || !!subagentReadonly(s)
+  syncSendButton(s)
   // 运行状态上移标题栏：副标题「● 正在工作中」+ ⏹ 停止钮（仅运行时），输入框上不再有易误触的运行条
   const sub = $('#chat-sub')
   if (sub) {
@@ -6254,7 +6272,7 @@ function renderSheet(s) {
     },
   })
   }
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.19.2'))
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.19.3'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -7551,6 +7569,7 @@ function buildShell() {
       th.append(img, rm)
       strip.appendChild(th)
     })
+    syncSendButton()
   }
   const addImageFiles = async (files) => {
     const limits = S.current ? sess(S.current).imageLimits : null
@@ -7590,6 +7609,7 @@ function buildShell() {
   })
   // 输入草稿：按会话持久化
   input.addEventListener('input', () => {
+    syncSendButton()   // 运行中：一有内容发送键就恢复（排队 / 插话），清空又回到禁用态
     if (!S.current) return
     const t = input.textContent
     if (isSentEcho(t)) return
@@ -7628,6 +7648,7 @@ function buildShell() {
     input.innerHTML = ''
     input.textContent = ''
     clearDraft(S.current)
+    syncSendButton()   // 发出即清空：运行中按钮回到禁用态
     const wipeEcho = () => { if (isSentEcho(input.textContent)) return }
     requestAnimationFrame(wipeEcho)
     setTimeout(wipeEcho, 0)
@@ -7641,13 +7662,15 @@ function buildShell() {
   let sendLpTimer = null, sendLpFired = false, sendMoved = false, sendSx = 0, sendSy = 0, sendTouchAt = 0
   const cancelLp = () => clearTimeout(sendLpTimer)
   sendBtn.addEventListener('touchstart', (e) => {
+    // disabled 只吞掉 click，iOS/Chromium 的 touch 事件照样会到达——这里显式挡掉
+    if (sendBtn.disabled) return
     const t = e.touches[0]
     sendSx = t.clientX; sendSy = t.clientY
     sendMoved = false; sendLpFired = false
     cancelLp()
     sendLpTimer = setTimeout(() => {
       // 空输入：doSend 本就空跑，不再震动/提示，避免「说要发却没发」的误导（验证 F3）
-      if (!input.textContent.trim() && !pendingImages.length) { sendLpFired = false; return }
+      if (!composerHasContent()) { sendLpFired = false; return }
       // 反向只在运行中有意义：空闲时 queue/steer 无差别，按普通发送处理、无提示（验证 F2）
       const s = S.current ? sess(S.current) : null
       if (!s || !s.running) { sendLpFired = true; doSend(null); return }
@@ -7667,12 +7690,12 @@ function buildShell() {
     cancelLp()
     const long = sendLpFired
     sendLpFired = false
-    if (sendMoved) return
+    if (sendMoved || sendBtn.disabled) return
     sendTouchAt = Date.now()
     if (e.cancelable) e.preventDefault()  // 已在这里发送，吞掉合成 click 防止重复
     if (!long) doSend(null)
   }, { passive: false })
-  sendBtn.addEventListener('click', () => { if (Date.now() - sendTouchAt > 500) doSend(null) })
+  sendBtn.addEventListener('click', () => { if (!sendBtn.disabled && Date.now() - sendTouchAt > 500) doSend(null) })
   // 排队操作单：背景关闭 + 下拽关闭
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
   // 会话长按操作单：初始化 + 背景关闭
