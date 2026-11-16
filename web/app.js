@@ -103,6 +103,7 @@ const ICONS = {
   qlist: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>',   // 微信式竖排三点（问号图标像帮助文档，弃用）
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
+  pin: SVG_OPEN + '<path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.7l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
   lock: SVG_OPEN + '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
@@ -275,6 +276,13 @@ async function answerWaterfall(eventId, outcome) {
 const S = {
   workspaces: [],           // [{workspaceId, path, title, sessionIds}]
   archived: new Set(),
+  // 置顶会话：宿主没有置顶协议，偏好只存本机（localStorage），按会话 id 持久化
+  pinned: (() => {
+    try {
+      const a = JSON.parse(localStorage.getItem('dshm-pinned') || '[]')
+      return new Set(Array.isArray(a) ? a.filter((x) => typeof x === 'string') : [])
+    } catch (e) { return new Set() }
+  })(),
   sessions: new Map(),      // id → sess
   presets: null,            // agentPreset.list 缓存 [{id, name, isDefault}]
   connState: 'connecting',  // connecting | online | offline
@@ -1873,6 +1881,19 @@ function statusBadge(s) {
 function findWs(s) {
   return S.workspaces.find((w) => (w.sessionIds || []).includes(s.id)) || null
 }
+/* 置顶会话：宿主没有置顶协议，偏好只存本机；列表里置顶项单独成组放在最前。 */
+function splitPinned(list) {
+  const pinned = [], rest = []
+  for (const s of list) (S.pinned.has(s.id) ? pinned : rest).push(s)
+  return [pinned, rest]
+}
+function pinGroup() {
+  const h = el('div', 'ws-group pin-group')
+  h.appendChild(icon('pin', 14))
+  h.appendChild(el('span', null, '置顶'))
+  return h
+}
+function savePinned() { try { localStorage.setItem('dshm-pinned', JSON.stringify([...S.pinned])) } catch (e) {} }
 function renderList() {
   const wrap = $('#session-list')
   if (!wrap) return
@@ -1895,11 +1916,18 @@ function renderList() {
       wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✓'))
       return
     }
-    const g = el('div', 'ws-group')
-    g.appendChild(icon('bolt', 14))
-    g.appendChild(el('span', null, '待处理（' + visible.length + '）'))
-    wrap.appendChild(g)
-    for (const s of visible) wrap.appendChild(sessionCard(s))
+    const [pinned, rest] = splitPinned(visible)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s))
+    }
+    if (rest.length) {
+      const g = el('div', 'ws-group')
+      g.appendChild(icon('bolt', 14))
+      g.appendChild(el('span', null, '待处理（' + rest.length + '）'))
+      wrap.appendChild(g)
+      for (const s of rest) wrap.appendChild(sessionCard(s))
+    }
     return
   }
   if (!visible.length) {
@@ -1932,11 +1960,16 @@ function renderList() {
     renderGlobSection(wrap, q, true)
     return
   }
-  // 按时间视图：按最近活跃降序，按「今天 / 昨天 / 近 7 天 / 更早」分组；
-  // 日期头不给数量，避免每个头都变成一屏噪声。
+  // 按时间视图：置顶会话单独成组放在最前，其余按最近活跃降序，
+  // 再按「今天 / 昨天 / 近 7 天 / 更早」分组；日期头不给数量，避免每个头都变成一屏噪声。
   if (S.listMode === 'time') {
+    const [pinned, rest] = splitPinned(visible)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s, true))
+    }
     let lastKey = ''
-    for (const s of visible) {
+    for (const s of rest) {
       const key = listDayKey(s.updatedAt)
       if (key !== lastKey) {
         lastKey = key
@@ -1974,7 +2007,12 @@ function renderList() {
     back.onclick = backFn
     back.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); backFn() } }
     wrap.appendChild(back)
-    for (const s of drill.list) wrap.appendChild(sessionCard(s))
+    const [pinned, rest] = splitPinned(drill.list)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s))
+    }
+    for (const s of rest) wrap.appendChild(sessionCard(s))
     setListTitle(drill.name)
     return
   }
@@ -2708,7 +2746,7 @@ function sessionCard(s, showWs) {
   card.onclick = () => { if (swipeState.openWrap) { closeSwipe() ; return } open() }
   card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
 
-  // ---- 左滑操作（iOS Mail 式）：滑出 重命名/分叉/停止/归档 ----
+  // ---- 左滑操作（iOS Mail 式）：滑出 置顶/重命名/分叉/停止/归档 ----
   const wrap = el('div', 'swipe-wrap')
   const actions = el('div', 'swipe-actions')
   const mkAct = (icoName, label, color, fn) => {
@@ -2723,6 +2761,16 @@ function sessionCard(s, showWs) {
     actions.appendChild(btn)
     return btn
   }
+  // 置顶是本机偏好：切换后立即重排列表，已置顶的卡片标签变为「取消置顶」
+  const pinned = S.pinned.has(s.id)
+  mkAct('pin', pinned ? '取消置顶' : '置顶', 'var(--orange)', () => {
+    vibrate(8)
+    if (S.pinned.has(s.id)) S.pinned.delete(s.id)
+    else S.pinned.add(s.id)
+    savePinned()
+    renderList()
+    toast(pinned ? '已取消置顶' : '已置顶')
+  })
   mkAct('pencil', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
   mkAct('fork', '分叉', 'var(--purple)', async () => {
     vibrate(8)

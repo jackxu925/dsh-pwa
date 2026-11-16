@@ -1280,7 +1280,9 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 .swipe-wrap { position:relative; overflow:hidden; margin:0 12px 10px; border-radius:18px; touch-action: pan-y; }
 /* touch-action:pan-y——纵向滚动归浏览器（滚了就 touchcancel、卡片弹回原位），横向手势归 JS（左滑出操作）；
    方向仲裁交给系统，不再靠 8px 阈值抢判，斜向滚动不会再把卡片拖歪 */
-.swipe-actions { position:absolute; top:0; right:0; bottom:0; display:flex; border-radius:18px; overflow:hidden; }
+.swipe-actions { position:absolute; top:0; right:0; bottom:0; display:flex; border-radius:18px; overflow:hidden; max-width:calc(100% - 44px); }
+/* max-width：跑到 5 个操作时（置顶 + 重命名/分叉/停止/归档），320 宽小屏也至少留 44px 卡片区，
+   否则整张卡被推出可视区，点按卡片收起左滑菜单的出口就没了 */
 .swipe-act {
   width:58px; border:none; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
   font-size:10.5px; font-weight:600; min-height:100%; padding:0;
