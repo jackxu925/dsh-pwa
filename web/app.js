@@ -1895,6 +1895,7 @@ function pinGroup() {
 }
 function savePinned() { try { localStorage.setItem('dshm-pinned', JSON.stringify([...S.pinned])) } catch (e) {} }
 function renderList() {
+  closeCardMenu(false)
   const wrap = $('#session-list')
   if (!wrap) return
   wrap.textContent = ''
@@ -2700,6 +2701,7 @@ function sessionCard(s, showWs) {
   const st = !s.subagent ? teamStats(s) : null
   const teamCard = !!st && hasTeamView(s)
   if (teamCard) card.classList.add('team-card')
+  const main = el('div', 's-main')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
   if (isUnread(s)) {
@@ -2708,22 +2710,22 @@ function sessionCard(s, showWs) {
     row1.appendChild(ud)
   }
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
-  card.appendChild(row1)
+  main.appendChild(row1)
   // 第二行只放“最后一条消息”摘要；不再把绝对路径当预览。没有摘要时宁缺毋滥，
   // 空白的新会话给一句「还没有消息」，其余交给行尾的工作区标签补上下文。
   const prev = previewText(s.lastPreview)
-  if (prev) card.appendChild(el('div', 's-preview', prev))
-  else if (s.blank) card.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
+  if (prev) main.appendChild(el('div', 's-preview', prev))
+  else if (s.blank) main.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
   else if (!showWs) {
     const wl = wsLabelOf(s)
-    if (wl) card.appendChild(el('div', 's-preview s-preview-empty', wl))
+    if (wl) main.appendChild(el('div', 's-preview s-preview-empty', wl))
   }
   // Lead 卡上的团队信号：成员头像 + 运行中人数 + 任务进度；子会话不铺进主列表。
   if (teamCard) {
     const rail = el('span', 'team-rail')
     rail.setAttribute('aria-hidden', 'true')
     card.appendChild(rail)
-    card.appendChild(teamCardLine(s, st))
+    main.appendChild(teamCardLine(s, st))
   }
   const row3 = el('div', 'row3')
   const [cls, label] = statusBadge(s)
@@ -2740,111 +2742,139 @@ function sessionCard(s, showWs) {
     const name = wsLabelOf(s)
     if (name) row3.appendChild(el('span', 's-ws', name))
   }
-  if (row3.children.length) card.appendChild(row3)
+  if (row3.children.length) main.appendChild(row3)
+
+  // 常驻右侧的 ⋯：不依赖隐藏手势，点开是竖向操作菜单。
+  const dots = el('button', 's-dots')
+  dots.type = 'button'
+  dots.dataset.sid = s.id
+  dots.setAttribute('aria-haspopup', 'menu')
+  dots.setAttribute('aria-expanded', 'false')
+  dots.setAttribute('aria-label', '更多操作：' + sessTitle(s))
+  const dotCircle = el('span', 's-dot-circle')
+  dotCircle.appendChild(icon('qlist', 18))
+  dots.appendChild(dotCircle)
+  dots.onclick = (e) => {
+    e.stopPropagation()
+    if (cardMenuState.sid === s.id) closeCardMenu()
+    else openCardMenu(s, dots, e.detail === 0)
+  }
+  card.append(main, dots)
   card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
-  card.onclick = () => { if (swipeState.openWrap) { closeSwipe() ; return } open() }
-  card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
-
-  // ---- 左滑操作（iOS Mail 式）：滑出 置顶/重命名/分叉/停止/归档 ----
-  const wrap = el('div', 'swipe-wrap')
-  const actions = el('div', 'swipe-actions')
-  const mkAct = (icoName, label, color, fn) => {
-    const btn = el('button', 'swipe-act')
-    btn.type = 'button'
-    btn.style.background = color
-    const gi = el('span', 'sa-ico')
-    gi.appendChild(icon(icoName, 16))
-    btn.appendChild(gi)
-    btn.appendChild(el('span', 'sa-label', label))
-    btn.onclick = () => { closeSwipe(); fn() }
-    actions.appendChild(btn)
-    return btn
+  card.onclick = () => { if (cardMenuState.sid) { closeCardMenu(false); return } open() }
+  card.onkeydown = (e) => {
+    if (e.target && e.target.closest && e.target.closest('.s-dots')) return
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() }
   }
-  // 置顶是本机偏好：切换后立即重排列表，已置顶的卡片标签变为「取消置顶」
-  const pinned = S.pinned.has(s.id)
-  mkAct('pin', pinned ? '取消置顶' : '置顶', 'var(--orange)', () => {
-    vibrate(8)
-    if (S.pinned.has(s.id)) S.pinned.delete(s.id)
-    else S.pinned.add(s.id)
-    savePinned()
+  return card
+}
+/* 会话卡右侧 ⋯ 菜单：常驻入口，点开竖向菜单（替代左滑手势）。 */
+const cardMenuState = { sid: null, btn: null }
+function togglePinned(s) {
+  const on = !S.pinned.has(s.id)
+  if (on) S.pinned.add(s.id)
+  else S.pinned.delete(s.id)
+  savePinned()
+  return on
+}
+function closeCardMenu(refocus) {
+  if (!cardMenuState.sid) return
+  const menu = $('#card-menu'), catcher = $('#card-menu-catcher')
+  if (menu) { menu.classList.remove('show'); menu.textContent = '' }
+  if (catcher) catcher.classList.remove('show')
+  if (cardMenuState.btn) cardMenuState.btn.setAttribute('aria-expanded', 'false')
+  const btn = cardMenuState.btn
+  cardMenuState.sid = null
+  cardMenuState.btn = null
+  ovPop('card-menu')
+  if (refocus && btn && btn.isConnected) btn.focus({ preventScroll: true })
+}
+function cardMenuRow(act, ico, label, cls) {
+  const b = el('button', 'card-menu-row' + (cls ? ' ' + cls : ''))
+  b.type = 'button'
+  b.setAttribute('role', 'menuitem')
+  b.dataset.act = act
+  b.appendChild(icon(ico, 18))
+  b.appendChild(el('span', null, label))
+  return b
+}
+function cardMenuRows(s) {
+  const frag = document.createDocumentFragment()
+  frag.appendChild(cardMenuRow('pin', 'pin', S.pinned.has(s.id) ? '取消置顶' : '置顶', 'pin' + (S.pinned.has(s.id) ? ' on' : '')))
+  frag.appendChild(cardMenuRow('rename', 'pencil', '改名'))
+  frag.appendChild(cardMenuRow('fork', 'fork', '分叉'))
+  if (s.running) frag.appendChild(cardMenuRow('stop', 'stop', '停止', 'stop'))
+  const sep = el('div', 'card-menu-sep')
+  sep.setAttribute('role', 'separator')
+  frag.appendChild(sep)
+  frag.appendChild(cardMenuRow('archive', 'archive', '归档'))
+  return frag
+}
+function positionCardMenu(btn) {
+  const menu = $('#card-menu')
+  if (!menu) return
+  const r = btn.getBoundingClientRect()
+  const mw = menu.offsetWidth, mh = menu.offsetHeight
+  let left = Math.min(window.innerWidth - mw - 10, Math.max(10, r.right - mw))
+  let top = r.bottom + 6
+  if (top + mh > window.innerHeight - 10) top = r.top - mh - 6
+  top = Math.max(10, top)
+  menu.style.left = Math.round(left) + 'px'
+  menu.style.top = Math.round(top) + 'px'
+}
+function openCardMenu(s, btn, focusFirst) {
+  closeCardMenu(false)
+  const menu = $('#card-menu'), catcher = $('#card-menu-catcher')
+  if (!menu || !catcher) return
+  cardMenuState.sid = s.id
+  cardMenuState.btn = btn
+  menu.textContent = ''
+  menu.appendChild(cardMenuRows(s))
+  catcher.classList.add('show')
+  menu.classList.add('show')
+  btn.setAttribute('aria-expanded', 'true')
+  positionCardMenu(btn)
+  menu.onclick = (e) => {
+    const row = e.target.closest('.card-menu-row')
+    if (row) { e.stopPropagation(); doCardMenuAction(row.dataset.act) }
+  }
+  catcher.onclick = () => closeCardMenu(false)
+  ovPush('card-menu')
+  if (focusFirst) requestAnimationFrame(() => { const first = menu.querySelector('.card-menu-row'); if (first) first.focus({ preventScroll: true }) })
+}
+async function doCardMenuAction(act) {
+  const sid = cardMenuState.sid
+  if (!sid) return
+  const s = sess(sid)
+  closeCardMenu(false)
+  if (!s) return
+  vibrate(8)
+  if (act === 'pin') {
+    const on = togglePinned(s)
     renderList()
-    toast(pinned ? '已取消置顶' : '已置顶')
-  })
-  mkAct('pencil', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
-  mkAct('fork', '分叉', 'var(--purple)', async () => {
-    vibrate(8)
+    toast(on ? '已置顶' : '已取消置顶')
+    return
+  }
+  if (act === 'rename') { openSessionMenu(s.id, 0, 0, true); return }
+  if (act === 'fork') {
     try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId; flushForkTail(v.sessionId) } catch (e) { toast('分叉失败：' + e.message, true) }
-  })
-  if (s.running) mkAct('stop', '停止', 'var(--red)', async () => {
-    vibrate(8)
+    return
+  }
+  if (act === 'stop') {
     try { await rpc('session/cancel', { request: { sessionId: s.id } }); s.running = false; renderList(); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
-  })
-  mkAct('archive', '归档', 'var(--text-3)', async () => {
-    vibrate(8)
+    return
+  }
+  if (act === 'archive') {
     try { const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
-  })
-  wrap.append(actions, card)
-  initSwipe(wrap, card, actions)
-  return wrap
-}
-/* 左滑手势状态与初始化（全局同时只开一张卡） */
-const swipeState = { openWrap: null }
-function closeSwipe() {
-  if (swipeState.openWrap) {
-    swipeState.openWrap.classList.remove('open', 'dragging')
-    swipeState.openWrap.querySelector('.session-card').style.transform = ''
-    swipeState.openWrap = null
   }
 }
-function initSwipe(wrap, card, actions) {
-  let sx = 0, sy = 0, dx = 0, dragging = false, decided = false
-  const W = () => actions.offsetWidth || 224
-  card.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return
-    sx = e.touches[0].clientX; sy = e.touches[0].clientY
-    dx = 0; dragging = false; decided = false
-  }, { passive: true })
-  card.addEventListener('touchmove', (e) => {
-    const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy
-    if (!decided) {
-      if (Math.abs(mx) < 12 && Math.abs(my) < 12) return
-      decided = true
-      // 严格方向锁：横向优势 1.5 倍且确有 12px 左移才算左滑；斜向拇指滚动不再把卡片拖歪
-      dragging = (mx < -12 && Math.abs(mx) > Math.abs(my) * 1.5) || (swipeState.openWrap === wrap && Math.abs(mx) > 12 && Math.abs(mx) > Math.abs(my) * 1.2)
-      if (dragging) { wrap.classList.add('dragging'); if (swipeState.openWrap && swipeState.openWrap !== wrap) closeSwipe() }
-    }
-    if (!dragging) return
-    const base = swipeState.openWrap === wrap ? -W() : 0
-    dx = Math.min(0, base + mx)
-    card.style.transform = 'translateX(' + dx + 'px)'
-    if (e.cancelable) e.preventDefault()
-  }, { passive: false })
-  const finish = () => {
-    if (!decided || !dragging) return
-    dragging = false
-    wrap.classList.remove('dragging')
-    const threshold = -W() * 0.45
-    if (dx < threshold) {
-      card.style.transform = 'translateX(-' + W() + 'px)'
-      wrap.classList.add('open')
-      swipeState.openWrap = wrap
-      vibrate(8)
-    } else {
-      card.style.transform = ''
-      wrap.classList.remove('open')
-      if (swipeState.openWrap === wrap) swipeState.openWrap = null
-    }
-    dx = 0
-  }
-  card.addEventListener('touchend', finish)
-  card.addEventListener('touchcancel', finish)
-}
+window.addEventListener('resize', () => closeCardMenu(false))
 /* 长按会话卡 → 操作单（重命名 / 分叉 / 归档 / 停止），对齐桌面能力 */
 let sessMenuTimer = null
 function initSessionLongPress(sc) {
   if (!sc) return
-  // 移动端改为左滑操作（见 sessionCard/initSwipe）；长按容易触发系统文字选择，已弃用
+  // 移动端用卡片右侧的 ⋯ 菜单；长按容易触发系统文字选择，已弃用。
   // 桌面调试：右键唤出
   sc.addEventListener('contextmenu', (e) => {
     const card = e.target.closest && e.target.closest('.session-card')
@@ -7114,7 +7144,7 @@ function initPtr(sc) {
     if (!decided) {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
       decided = true
-      pulling = sc.scrollTop <= 0 && dy > 0 && Math.abs(dy) > Math.abs(dx) * 1.5 && !document.querySelector('.swipe-wrap.dragging')
+      pulling = sc.scrollTop <= 0 && dy > 0 && Math.abs(dy) > Math.abs(dx) * 1.5
     }
     if (!pulling) return
     if (dy > 12 && sc.scrollTop <= 0) {
@@ -7410,6 +7440,8 @@ function buildShell() {
       <div class="sheet-scroll" id="kids-body"></div>
     </div>
   </div>
+  <div class="card-menu-catcher" id="card-menu-catcher"></div>
+  <div class="card-menu" id="card-menu" role="menu" aria-label="会话操作"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
@@ -7423,11 +7455,11 @@ function buildShell() {
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', () => { renderList(); scheduleGlobSearch() })
   // 列表视图切换：最近活跃平铺 / 按工作区分组
-  // 列表一滚就收起左滑操作（iOS Mail 同款）：滚动中不再有横在半路的卡片
+  // 列表一滚就收起卡片 ⋯ 菜单：按钮位置会变，菜单不能悬在原地。
   const listScroll = $('#list-scroll')
-  if (listScroll && !listScroll._swipeClose) {
-    listScroll._swipeClose = true
-    listScroll.addEventListener('scroll', () => closeSwipe(), { passive: true })
+  if (listScroll && !listScroll._menuClose) {
+    listScroll._menuClose = true
+    listScroll.addEventListener('scroll', () => closeCardMenu(false), { passive: true })
   }
   document.querySelectorAll('.seg-btn').forEach((b) => {
     b.onclick = () => {
@@ -8560,7 +8592,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
