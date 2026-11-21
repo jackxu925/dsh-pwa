@@ -103,6 +103,7 @@ const ICONS = {
   qlist: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>',   // 微信式竖排三点（问号图标像帮助文档，弃用）
   fork: SVG_OPEN + '<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3v-2M12 12.2v4.6"/></svg>',
   archive: SVG_OPEN + '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5M10 12.5h4"/></svg>',
+  pin: SVG_OPEN + '<path d="M12 17v5M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.7l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>',
   sliders: SVG_OPEN + '<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></svg>',
   lock: SVG_OPEN + '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>',
@@ -275,6 +276,13 @@ async function answerWaterfall(eventId, outcome) {
 const S = {
   workspaces: [],           // [{workspaceId, path, title, sessionIds}]
   archived: new Set(),
+  // 置顶会话：宿主没有置顶协议，偏好只存本机（localStorage），按会话 id 持久化
+  pinned: (() => {
+    try {
+      const a = JSON.parse(localStorage.getItem('dshm-pinned') || '[]')
+      return new Set(Array.isArray(a) ? a.filter((x) => typeof x === 'string') : [])
+    } catch (e) { return new Set() }
+  })(),
   sessions: new Map(),      // id → sess
   presets: null,            // agentPreset.list 缓存 [{id, name, isDefault}]
   connState: 'connecting',  // connecting | online | offline
@@ -699,8 +707,12 @@ function stepTiming(st, event, d) {
   }
 }
 
-function foldEvent(s, event, view) {
+/* opts.historical：历史快照/翻页回放，不是刚刚发生的实时事件。
+ * foldEvent 里有副作用（turn/end 自动播报/自动朗读），回放历史时绝不能触发——
+ * 否则重连时 follow 快照会把上一条回复从头重播一遍（语音模式表现为「第二段还是上一段的声音」）。 */
+function foldEvent(s, event, view, opts) {
   const t = event.type, d = event.data || {}
+  const historical = !!(opts && opts.historical)
   // 最近一次事件时间（宿主时间轴）+ 收到它的本地时刻：实时 pill 靠这对值把本地时钟换算回宿主时钟
   s._lastEventAt = event.time
   s._lastEventSeenAt = Date.now()
@@ -863,6 +875,7 @@ function foldEvent(s, event, view) {
     }
     case 'turn/start':
       s.running = true; s._curTurn = d.turn; s._turnStartAt = event.time
+      if (!historical) voiceCancelScheduledSpeak()   // 新的一轮已开始：上一条回复的「稍后播报」作废，别打断用户刚发的消息
       s._step = null
       s._turnTiming = { llmMs: 0, ttftMs: null, ttftStep: null, decodeMs: 0, decodeTokens: 0, hasDecode: false }
       s._turnUsage = null
@@ -871,14 +884,17 @@ function foldEvent(s, event, view) {
     case 'turn/end': {
       s.running = false
       if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
-      // 自动朗读：语音模式走对讲全链路；朗读模式走同一管线（改写→云端/降级），表面是浮播报条
-      const endMode = modeOf(s.id)
-      if (endMode === 'voice' && s.loaded && S.current === s.id) {
-        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
-        if (lastA) setTimeout(() => { if (S.current === s.id && modeOf(s.id) === 'voice') voiceSpeak(s, lastA) }, 500)
-      } else if (endMode === 'read' && s.loaded && S.current === s.id) {
-        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
-        if (lastA) setTimeout(() => { if (S.current === s.id && modeOf(s.id) === 'read') readSpeak(s, lastA) }, 500)
+      // 自动朗读（三态版）：语音=对讲全链路；朗读=同一管线的浮条表面。只播实时轮——
+      // 重连快照里的历史 turn/end 不能把旧回复再播一遍（main 的 historical 守卫）。
+      if (!historical) {
+        const endMode = modeOf(s.id)
+        if (endMode === 'voice' && s.loaded && S.current === s.id) {
+          const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+          if (lastA) voiceScheduleSpeak(s, lastA)
+        } else if (endMode === 'read' && s.loaded && S.current === s.id) {
+          const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+          if (lastA) setTimeout(() => { if (S.current === s.id && modeOf(s.id) === 'read') readSpeak(s, lastA) }, 500)
+        }
       }
       // 轮级统计：turn/start→turn/end 的时长 + 本轮各步 usage 汇总（事件驱动累计，纯思考/工具步不渲染但也要算）
       const durMs = s._turnStartAt ? Math.max(0, event.time - s._turnStartAt) : 0
@@ -1477,6 +1493,7 @@ function renderQuoteStrip() {
     chip.onclick = () => { vibrate(8); openQuoteSheet(S.current, i) }
     strip.appendChild(chip)
   })
+  syncSendButton()
 }
 /* 注解面板 */
 let quoteEdit = { sid: null, i: 0 }
@@ -1867,7 +1884,21 @@ function statusBadge(s) {
 function findWs(s) {
   return S.workspaces.find((w) => (w.sessionIds || []).includes(s.id)) || null
 }
+/* 置顶会话：宿主没有置顶协议，偏好只存本机；列表里置顶项单独成组放在最前。 */
+function splitPinned(list) {
+  const pinned = [], rest = []
+  for (const s of list) (S.pinned.has(s.id) ? pinned : rest).push(s)
+  return [pinned, rest]
+}
+function pinGroup() {
+  const h = el('div', 'ws-group pin-group')
+  h.appendChild(icon('pin', 14))
+  h.appendChild(el('span', null, '置顶'))
+  return h
+}
+function savePinned() { try { localStorage.setItem('dshm-pinned', JSON.stringify([...S.pinned])) } catch (e) {} }
 function renderList() {
+  closeCardMenu(false)
   const wrap = $('#session-list')
   if (!wrap) return
   wrap.textContent = ''
@@ -1889,11 +1920,18 @@ function renderList() {
       wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✓'))
       return
     }
-    const g = el('div', 'ws-group')
-    g.appendChild(icon('bolt', 14))
-    g.appendChild(el('span', null, '待处理（' + visible.length + '）'))
-    wrap.appendChild(g)
-    for (const s of visible) wrap.appendChild(sessionCard(s))
+    const [pinned, rest] = splitPinned(visible)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s))
+    }
+    if (rest.length) {
+      const g = el('div', 'ws-group')
+      g.appendChild(icon('bolt', 14))
+      g.appendChild(el('span', null, '待处理（' + rest.length + '）'))
+      wrap.appendChild(g)
+      for (const s of rest) wrap.appendChild(sessionCard(s))
+    }
     return
   }
   if (!visible.length) {
@@ -1926,11 +1964,16 @@ function renderList() {
     renderGlobSection(wrap, q, true)
     return
   }
-  // 按时间视图：按最近活跃降序，按「今天 / 昨天 / 近 7 天 / 更早」分组；
-  // 日期头不给数量，避免每个头都变成一屏噪声。
+  // 按时间视图：置顶会话单独成组放在最前，其余按最近活跃降序，
+  // 再按「今天 / 昨天 / 近 7 天 / 更早」分组；日期头不给数量，避免每个头都变成一屏噪声。
   if (S.listMode === 'time') {
+    const [pinned, rest] = splitPinned(visible)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s, true))
+    }
     let lastKey = ''
-    for (const s of visible) {
+    for (const s of rest) {
       const key = listDayKey(s.updatedAt)
       if (key !== lastKey) {
         lastKey = key
@@ -1968,7 +2011,12 @@ function renderList() {
     back.onclick = backFn
     back.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); backFn() } }
     wrap.appendChild(back)
-    for (const s of drill.list) wrap.appendChild(sessionCard(s))
+    const [pinned, rest] = splitPinned(drill.list)
+    if (pinned.length) {
+      wrap.appendChild(pinGroup())
+      for (const s of pinned) wrap.appendChild(sessionCard(s))
+    }
+    for (const s of rest) wrap.appendChild(sessionCard(s))
     setListTitle(drill.name)
     return
   }
@@ -2656,6 +2704,7 @@ function sessionCard(s, showWs) {
   const st = !s.subagent ? teamStats(s) : null
   const teamCard = !!st && hasTeamView(s)
   if (teamCard) card.classList.add('team-card')
+  const main = el('div', 's-main')
   const row1 = el('div', 'row1')
   row1.appendChild(el('span', 's-title', sessTitle(s)))
   if (isUnread(s)) {
@@ -2664,22 +2713,22 @@ function sessionCard(s, showWs) {
     row1.appendChild(ud)
   }
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
-  card.appendChild(row1)
+  main.appendChild(row1)
   // 第二行只放“最后一条消息”摘要；不再把绝对路径当预览。没有摘要时宁缺毋滥，
   // 空白的新会话给一句「还没有消息」，其余交给行尾的工作区标签补上下文。
   const prev = previewText(s.lastPreview)
-  if (prev) card.appendChild(el('div', 's-preview', prev))
-  else if (s.blank) card.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
+  if (prev) main.appendChild(el('div', 's-preview', prev))
+  else if (s.blank) main.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
   else if (!showWs) {
     const wl = wsLabelOf(s)
-    if (wl) card.appendChild(el('div', 's-preview s-preview-empty', wl))
+    if (wl) main.appendChild(el('div', 's-preview s-preview-empty', wl))
   }
   // Lead 卡上的团队信号：成员头像 + 运行中人数 + 任务进度；子会话不铺进主列表。
   if (teamCard) {
     const rail = el('span', 'team-rail')
     rail.setAttribute('aria-hidden', 'true')
     card.appendChild(rail)
-    card.appendChild(teamCardLine(s, st))
+    main.appendChild(teamCardLine(s, st))
   }
   const row3 = el('div', 'row3')
   const [cls, label] = statusBadge(s)
@@ -2696,101 +2745,139 @@ function sessionCard(s, showWs) {
     const name = wsLabelOf(s)
     if (name) row3.appendChild(el('span', 's-ws', name))
   }
-  if (row3.children.length) card.appendChild(row3)
+  if (row3.children.length) main.appendChild(row3)
+
+  // 常驻右侧的 ⋯：不依赖隐藏手势，点开是竖向操作菜单。
+  const dots = el('button', 's-dots')
+  dots.type = 'button'
+  dots.dataset.sid = s.id
+  dots.setAttribute('aria-haspopup', 'menu')
+  dots.setAttribute('aria-expanded', 'false')
+  dots.setAttribute('aria-label', '更多操作：' + sessTitle(s))
+  const dotCircle = el('span', 's-dot-circle')
+  dotCircle.appendChild(icon('qlist', 18))
+  dots.appendChild(dotCircle)
+  dots.onclick = (e) => {
+    e.stopPropagation()
+    if (cardMenuState.sid === s.id) closeCardMenu()
+    else openCardMenu(s, dots, e.detail === 0)
+  }
+  card.append(main, dots)
   card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
-  card.onclick = () => { if (swipeState.openWrap) { closeSwipe() ; return } open() }
-  card.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
-
-  // ---- 左滑操作（iOS Mail 式）：滑出 重命名/分叉/停止/归档 ----
-  const wrap = el('div', 'swipe-wrap')
-  const actions = el('div', 'swipe-actions')
-  const mkAct = (icoName, label, color, fn) => {
-    const btn = el('button', 'swipe-act')
-    btn.type = 'button'
-    btn.style.background = color
-    const gi = el('span', 'sa-ico')
-    gi.appendChild(icon(icoName, 16))
-    btn.appendChild(gi)
-    btn.appendChild(el('span', 'sa-label', label))
-    btn.onclick = () => { closeSwipe(); fn() }
-    actions.appendChild(btn)
-    return btn
+  card.onclick = () => { if (cardMenuState.sid) { closeCardMenu(false); return } open() }
+  card.onkeydown = (e) => {
+    if (e.target && e.target.closest && e.target.closest('.s-dots')) return
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() }
   }
-  mkAct('pencil', '改名', 'var(--accent)', () => openSessionMenu(s.id, 0, 0, true))
-  mkAct('fork', '分叉', 'var(--purple)', async () => {
-    vibrate(8)
+  return card
+}
+/* 会话卡右侧 ⋯ 菜单：常驻入口，点开竖向菜单（替代左滑手势）。 */
+const cardMenuState = { sid: null, btn: null }
+function togglePinned(s) {
+  const on = !S.pinned.has(s.id)
+  if (on) S.pinned.add(s.id)
+  else S.pinned.delete(s.id)
+  savePinned()
+  return on
+}
+function closeCardMenu(refocus) {
+  if (!cardMenuState.sid) return
+  const menu = $('#card-menu'), catcher = $('#card-menu-catcher')
+  if (menu) { menu.classList.remove('show'); menu.textContent = '' }
+  if (catcher) catcher.classList.remove('show')
+  if (cardMenuState.btn) cardMenuState.btn.setAttribute('aria-expanded', 'false')
+  const btn = cardMenuState.btn
+  cardMenuState.sid = null
+  cardMenuState.btn = null
+  ovPop('card-menu')
+  if (refocus && btn && btn.isConnected) btn.focus({ preventScroll: true })
+}
+function cardMenuRow(act, ico, label, cls) {
+  const b = el('button', 'card-menu-row' + (cls ? ' ' + cls : ''))
+  b.type = 'button'
+  b.setAttribute('role', 'menuitem')
+  b.dataset.act = act
+  b.appendChild(icon(ico, 18))
+  b.appendChild(el('span', null, label))
+  return b
+}
+function cardMenuRows(s) {
+  const frag = document.createDocumentFragment()
+  frag.appendChild(cardMenuRow('pin', 'pin', S.pinned.has(s.id) ? '取消置顶' : '置顶', 'pin' + (S.pinned.has(s.id) ? ' on' : '')))
+  frag.appendChild(cardMenuRow('rename', 'pencil', '改名'))
+  frag.appendChild(cardMenuRow('fork', 'fork', '分叉'))
+  if (s.running) frag.appendChild(cardMenuRow('stop', 'stop', '停止', 'stop'))
+  const sep = el('div', 'card-menu-sep')
+  sep.setAttribute('role', 'separator')
+  frag.appendChild(sep)
+  frag.appendChild(cardMenuRow('archive', 'archive', '归档'))
+  return frag
+}
+function positionCardMenu(btn) {
+  const menu = $('#card-menu')
+  if (!menu) return
+  const r = btn.getBoundingClientRect()
+  const mw = menu.offsetWidth, mh = menu.offsetHeight
+  let left = Math.min(window.innerWidth - mw - 10, Math.max(10, r.right - mw))
+  let top = r.bottom + 6
+  if (top + mh > window.innerHeight - 10) top = r.top - mh - 6
+  top = Math.max(10, top)
+  menu.style.left = Math.round(left) + 'px'
+  menu.style.top = Math.round(top) + 'px'
+}
+function openCardMenu(s, btn, focusFirst) {
+  closeCardMenu(false)
+  const menu = $('#card-menu'), catcher = $('#card-menu-catcher')
+  if (!menu || !catcher) return
+  cardMenuState.sid = s.id
+  cardMenuState.btn = btn
+  menu.textContent = ''
+  menu.appendChild(cardMenuRows(s))
+  catcher.classList.add('show')
+  menu.classList.add('show')
+  btn.setAttribute('aria-expanded', 'true')
+  positionCardMenu(btn)
+  menu.onclick = (e) => {
+    const row = e.target.closest('.card-menu-row')
+    if (row) { e.stopPropagation(); doCardMenuAction(row.dataset.act) }
+  }
+  catcher.onclick = () => closeCardMenu(false)
+  ovPush('card-menu')
+  if (focusFirst) requestAnimationFrame(() => { const first = menu.querySelector('.card-menu-row'); if (first) first.focus({ preventScroll: true }) })
+}
+async function doCardMenuAction(act) {
+  const sid = cardMenuState.sid
+  if (!sid) return
+  const s = sess(sid)
+  closeCardMenu(false)
+  if (!s) return
+  vibrate(8)
+  if (act === 'pin') {
+    const on = togglePinned(s)
+    renderList()
+    toast(on ? '已置顶' : '已取消置顶')
+    return
+  }
+  if (act === 'rename') { openSessionMenu(s.id, 0, 0, true); return }
+  if (act === 'fork') {
     try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId; flushForkTail(v.sessionId) } catch (e) { toast('分叉失败：' + e.message, true) }
-  })
-  if (s.running) mkAct('stop', '停止', 'var(--red)', async () => {
-    vibrate(8)
+    return
+  }
+  if (act === 'stop') {
     try { await rpc('session/cancel', { request: { sessionId: s.id } }); s.running = false; renderList(); toast('已发送停止 ■') } catch (e) { toast(e.message, true) }
-  })
-  mkAct('archive', '归档', 'var(--text-3)', async () => {
-    vibrate(8)
+    return
+  }
+  if (act === 'archive') {
     try { const av = await rpc('workspace/archiveSession', { request: { sessionId: s.id } }); if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds); S.sessions.delete(s.id); renderList(); toast('已归档（桌面端可恢复）') } catch (e) { toast('归档失败：' + e.message, true) }
-  })
-  wrap.append(actions, card)
-  initSwipe(wrap, card, actions)
-  return wrap
-}
-/* 左滑手势状态与初始化（全局同时只开一张卡） */
-const swipeState = { openWrap: null }
-function closeSwipe() {
-  if (swipeState.openWrap) {
-    swipeState.openWrap.classList.remove('open', 'dragging')
-    swipeState.openWrap.querySelector('.session-card').style.transform = ''
-    swipeState.openWrap = null
   }
 }
-function initSwipe(wrap, card, actions) {
-  let sx = 0, sy = 0, dx = 0, dragging = false, decided = false
-  const W = () => actions.offsetWidth || 224
-  card.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return
-    sx = e.touches[0].clientX; sy = e.touches[0].clientY
-    dx = 0; dragging = false; decided = false
-  }, { passive: true })
-  card.addEventListener('touchmove', (e) => {
-    const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy
-    if (!decided) {
-      if (Math.abs(mx) < 12 && Math.abs(my) < 12) return
-      decided = true
-      // 严格方向锁：横向优势 1.5 倍且确有 12px 左移才算左滑；斜向拇指滚动不再把卡片拖歪
-      dragging = (mx < -12 && Math.abs(mx) > Math.abs(my) * 1.5) || (swipeState.openWrap === wrap && Math.abs(mx) > 12 && Math.abs(mx) > Math.abs(my) * 1.2)
-      if (dragging) { wrap.classList.add('dragging'); if (swipeState.openWrap && swipeState.openWrap !== wrap) closeSwipe() }
-    }
-    if (!dragging) return
-    const base = swipeState.openWrap === wrap ? -W() : 0
-    dx = Math.min(0, base + mx)
-    card.style.transform = 'translateX(' + dx + 'px)'
-    if (e.cancelable) e.preventDefault()
-  }, { passive: false })
-  const finish = () => {
-    if (!decided || !dragging) return
-    dragging = false
-    wrap.classList.remove('dragging')
-    const threshold = -W() * 0.45
-    if (dx < threshold) {
-      card.style.transform = 'translateX(-' + W() + 'px)'
-      wrap.classList.add('open')
-      swipeState.openWrap = wrap
-      vibrate(8)
-    } else {
-      card.style.transform = ''
-      wrap.classList.remove('open')
-      if (swipeState.openWrap === wrap) swipeState.openWrap = null
-    }
-    dx = 0
-  }
-  card.addEventListener('touchend', finish)
-  card.addEventListener('touchcancel', finish)
-}
+window.addEventListener('resize', () => closeCardMenu(false))
 /* 长按会话卡 → 操作单（重命名 / 分叉 / 归档 / 停止），对齐桌面能力 */
 let sessMenuTimer = null
 function initSessionLongPress(sc) {
   if (!sc) return
-  // 移动端改为左滑操作（见 sessionCard/initSwipe）；长按容易触发系统文字选择，已弃用
+  // 移动端用卡片右侧的 ⋯ 菜单；长按容易触发系统文字选择，已弃用。
   // 桌面调试：右键唤出
   sc.addEventListener('contextmenu', (e) => {
     const card = e.target.closest && e.target.closest('.session-card')
@@ -3726,7 +3813,7 @@ async function loadEarlier(s, opts) {
     const v = await rpc('session/page', { request: { address: followAddress(s.id), throughSeq: s.oldestSeq - 1, maxMessages } })
     const older = []
     const tmp = { items: older, callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const rec of v.records || []) foldEvent(tmp, rec.event || rec)
+    for (const rec of v.records || []) foldEvent(tmp, rec.event || rec, undefined, { historical: true })
     // 这一页末尾若停在「只有思考没有正文」的消息上，它属于下一页的第一条内容，补给那个条目
     const dangling = tmp._thinkBuf || ''
     let patchedHead = null
@@ -4203,7 +4290,7 @@ Mux.handlers.follow = (v, meta) => {
     s._pendingCalls = []
     s._thinkBuf = ''
     const records = v.records || []
-    for (const rec of records) foldEvent(s, rec.event || rec)
+    for (const rec of records) foldEvent(s, rec.event || rec, undefined, { historical: true })
     for (const p of pend) {
       if (!p.rpcId && !p.text && !(p.images && p.images.length)) continue   // 无身份也无内容的老幽灵：不再续命
       if (p.rpcId && s.items.some((i) => i.rpcId === p.rpcId)) continue
@@ -4359,6 +4446,7 @@ async function openSession(id, force) {
   renderChat(s, true)
   refreshChatChrome(s)
   restoreDraft(id)
+  syncSendButton(s)   // 草稿可能是刚恢复的：有字就恢复发送键
   loadFb(s)   // 消息评价表（👍/👎）：打开会话时拉一次，静默失败
 }
 function reloadCurrent() {
@@ -4366,6 +4454,23 @@ function reloadCurrent() {
   if (!S.current) return
   const s = sess(S.current)
   loadHistory(s).then(() => renderChat(s)).catch(() => {})
+}
+/* 发送键的可用状态：连接断开 / 会话只读，以及「AI 正在回复且没有可发内容」时禁用。
+   运行中一旦输入文字、附上图片或引用消息就恢复——排队 / 插话能力不变；
+   用户反馈的是 AI 回复期间空输入框旁那颗钮仍和空闲时一样亮、看不出不能点。 */
+function composerHasContent() {
+  const input = $('#chat-input')
+  const text = input ? input.textContent.trim() : ''
+  const images = document.querySelectorAll('#attach-strip .attach-thumb').length
+  const quotes = S.current ? quotesOf(S.current).length : 0
+  return !!(text || images || quotes)
+}
+function syncSendButton(s) {
+  const send = $('#send-btn')
+  if (!send) return
+  const cur = s || (S.current ? sess(S.current) : null)
+  const emptyWhileRunning = !!(cur && cur.running) && !composerHasContent()
+  send.disabled = S.connState !== 'online' || !!subagentReadonly(cur) || emptyWhileRunning
 }
 function refreshChatChrome(s) {
   renderGoalBanner(s)   // 目标横幅：进会话与状态刷新时同步
@@ -4376,8 +4481,7 @@ function refreshChatChrome(s) {
     input.dataset.ph = off ? '连接已断开…' : s.running ? '追加指令（steer）…' : '发消息…'
     input.classList.toggle('off', off)
   }
-  const send = $('#send-btn')
-  if (send) send.disabled = off || !!subagentReadonly(s)
+  syncSendButton(s)
   // 运行状态上移标题栏：副标题「● 正在工作中」+ ⏹ 停止钮（仅运行时），输入框上不再有易误触的运行条
   const sub = $('#chat-sub')
   if (sub) {
@@ -6320,7 +6424,7 @@ function renderSheet(s) {
     },
   })
   }
-  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.18.2'))
+  c.appendChild(el('div', 'ms-foot', 'DSH PWA · v1.19.3'))
 }
 /* 重命名：⋯ → 会话 → 重命名，就地编辑保存 */
 function openRenamePanel(s) {
@@ -6494,7 +6598,7 @@ function scanQuestions(s) {
       const recs = v.records || []
       if (!recs.length) break
       const tmp = { items: [], callArgs: new Map(), live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-      for (const rec of recs) foldEvent(tmp, rec.event || rec)
+      for (const rec of recs) foldEvent(tmp, rec.event || rec, undefined, { historical: true })
       const fresh = []
       for (const it of tmp.items) {
         if (!it || it.kind !== 'user') continue
@@ -6766,7 +6870,7 @@ async function seekToQuestion(s, ref) {
     const recs = (v.records || []).map((r) => r.event || r)
     if (!recs.length) break
     const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const e of recs) foldEvent(tmp, e)
+    for (const e of recs) foldEvent(tmp, e, undefined, { historical: true })
     block = tmp.items.concat(block)
     firstSeq = recs[0].seq
     if (firstSeq <= ref.seq) break          // 已经盖到目标提问
@@ -6795,7 +6899,7 @@ async function fillGap(s, gap) {
     if (i < 0) return   // 窗口已重组（又一次跳转），这块 gap 不在了
     if (!recs.length) { s.items.splice(i, 1); return }
     const tmp = { items: [], callArgs: s.callArgs, live: null, _todoCalls: new Set(), _pendingCalls: [], _thinkBuf: '' }
-    for (const e of recs) foldEvent(tmp, e)
+    for (const e of recs) foldEvent(tmp, e, undefined, { historical: true })
     const cut = recs[0].seq
     // 残余 gap 是「填不到底的下方」[gap.from..cut)，排在补进来的内容之前（时间更早）
     const refill = cut > gap.from ? [{ kind: 'gap', from: gap.from, to: cut }] : []
@@ -7114,7 +7218,7 @@ function initPtr(sc) {
     if (!decided) {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
       decided = true
-      pulling = sc.scrollTop <= 0 && dy > 0 && Math.abs(dy) > Math.abs(dx) * 1.5 && !document.querySelector('.swipe-wrap.dragging')
+      pulling = sc.scrollTop <= 0 && dy > 0 && Math.abs(dy) > Math.abs(dx) * 1.5
     }
     if (!pulling) return
     if (dy > 12 && sc.scrollTop <= 0) {
@@ -7429,6 +7533,8 @@ function buildShell() {
       <div class="sheet-scroll" id="kids-body"></div>
     </div>
   </div>
+  <div class="card-menu-catcher" id="card-menu-catcher"></div>
+  <div class="card-menu" id="card-menu" role="menu" aria-label="会话操作"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>`
   // 注入 SVG 图标
   document.querySelectorAll('[data-ic]').forEach((slot) => {
@@ -7442,11 +7548,11 @@ function buildShell() {
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
   $('#search').addEventListener('input', () => { renderList(); scheduleGlobSearch() })
   // 列表视图切换：最近活跃平铺 / 按工作区分组
-  // 列表一滚就收起左滑操作（iOS Mail 同款）：滚动中不再有横在半路的卡片
+  // 列表一滚就收起卡片 ⋯ 菜单：按钮位置会变，菜单不能悬在原地。
   const listScroll = $('#list-scroll')
-  if (listScroll && !listScroll._swipeClose) {
-    listScroll._swipeClose = true
-    listScroll.addEventListener('scroll', () => closeSwipe(), { passive: true })
+  if (listScroll && !listScroll._menuClose) {
+    listScroll._menuClose = true
+    listScroll.addEventListener('scroll', () => closeCardMenu(false), { passive: true })
   }
   document.querySelectorAll('.seg-btn').forEach((b) => {
     b.onclick = () => {
@@ -7636,6 +7742,7 @@ function buildShell() {
       th.append(img, rm)
       strip.appendChild(th)
     })
+    syncSendButton()
   }
   const addImageFiles = async (files) => {
     const limits = S.current ? sess(S.current).imageLimits : null
@@ -7675,6 +7782,7 @@ function buildShell() {
   })
   // 输入草稿：按会话持久化
   input.addEventListener('input', () => {
+    syncSendButton()   // 运行中：一有内容发送键就恢复（排队 / 插话），清空又回到禁用态
     if (!S.current) return
     const t = input.textContent
     if (isSentEcho(t)) return
@@ -7713,6 +7821,7 @@ function buildShell() {
     input.innerHTML = ''
     input.textContent = ''
     clearDraft(S.current)
+    syncSendButton()   // 发出即清空：运行中按钮回到禁用态
     const wipeEcho = () => { if (isSentEcho(input.textContent)) return }
     requestAnimationFrame(wipeEcho)
     setTimeout(wipeEcho, 0)
@@ -7726,13 +7835,15 @@ function buildShell() {
   let sendLpTimer = null, sendLpFired = false, sendMoved = false, sendSx = 0, sendSy = 0, sendTouchAt = 0
   const cancelLp = () => clearTimeout(sendLpTimer)
   sendBtn.addEventListener('touchstart', (e) => {
+    // disabled 只吞掉 click，iOS/Chromium 的 touch 事件照样会到达——这里显式挡掉
+    if (sendBtn.disabled) return
     const t = e.touches[0]
     sendSx = t.clientX; sendSy = t.clientY
     sendMoved = false; sendLpFired = false
     cancelLp()
     sendLpTimer = setTimeout(() => {
       // 空输入：doSend 本就空跑，不再震动/提示，避免「说要发却没发」的误导（验证 F3）
-      if (!input.textContent.trim() && !pendingImages.length) { sendLpFired = false; return }
+      if (!composerHasContent()) { sendLpFired = false; return }
       // 反向只在运行中有意义：空闲时 queue/steer 无差别，按普通发送处理、无提示（验证 F2）
       const s = S.current ? sess(S.current) : null
       if (!s || !s.running) { sendLpFired = true; doSend(null); return }
@@ -7752,12 +7863,12 @@ function buildShell() {
     cancelLp()
     const long = sendLpFired
     sendLpFired = false
-    if (sendMoved) return
+    if (sendMoved || sendBtn.disabled) return
     sendTouchAt = Date.now()
     if (e.cancelable) e.preventDefault()  // 已在这里发送，吞掉合成 click 防止重复
     if (!long) doSend(null)
   }, { passive: false })
-  sendBtn.addEventListener('click', () => { if (Date.now() - sendTouchAt > 500) doSend(null) })
+  sendBtn.addEventListener('click', () => { if (!sendBtn.disabled && Date.now() - sendTouchAt > 500) doSend(null) })
   // 排队操作单：背景关闭 + 下拽关闭
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
   // 会话长按操作单：初始化 + 背景关闭
@@ -7861,6 +7972,7 @@ const VOICE = {
   retryBlob: null, autoStopping: false,   // 识别失败保留音频 + 2 分钟上限
   asrAbort: null, sendTok: 0, sysPoll: null,   // 识别可取消 + 防双发 + 系统引擎完成轮询
   surface: 'voice', _barHold: false, _barPrep: false, _barDone: false,   // surface：'voice'=对讲面板 / 'bar'=浮播报条（朗读模式与手动🔊共用）
+  speakTimer: null, speakGen: 0,   // turn/end 的「稍后播报」可取消排期（gen 挡住旧定时器）
 }
 /* ---- 交互模式：文字 | 朗读 | 语音（按会话存储，2026-11-21 三态化） ----
  * 旧两个开关收敛进一个模式位：全局「自动朗读回答」(dshm-tts-auto) 与按会话
@@ -8018,6 +8130,7 @@ function syncModeBtn(m) {
 function voiceStopAll() {
   VOICE.tok++
   VOICE.sendTok++
+  voiceCancelScheduledSpeak()
   clearTimeout(VOICE.timer)
   try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (e) {}
   VOICE.asrAbort = null
@@ -8295,10 +8408,29 @@ function vRecCleanup() {
  * 浮播报条（朗读模式的自动播报 + 任何模式的手动 🔊）。管线本体只有一份。 */
 async function voiceSpeak(s, item) { return speakPipeline(s, item, 'voice') }
 async function readSpeak(s, item) { return speakPipeline(s, item, 'bar') }
+/* turn/end 后延 500ms 再开播（等最后一条渲染落定）。排期可取消：
+ * 新一轮开始 / 退出语音模式时作废；定时器醒来时若用户已在录音/识别也跳过，
+ * 旧定时器永远不会抢掉用户刚开始的对话。 */
+function voiceScheduleSpeak(s, item) {
+  voiceCancelScheduledSpeak()
+  const gen = VOICE.speakGen
+  VOICE.speakTimer = setTimeout(() => {
+    if (VOICE.speakGen !== gen || S.current !== s.id) return
+    if (VOICE.state === 'recording' || VOICE.state === 'asr') return   // 用户已在录/刚松开：这条回复已经不新鲜
+    voiceSpeak(s, item)
+  }, 500)
+}
+function voiceCancelScheduledSpeak() {
+  VOICE.speakGen++
+  if (VOICE.speakTimer) { clearTimeout(VOICE.speakTimer); VOICE.speakTimer = null }
+}
 async function speakPipeline(s, item, surface) {
+  if (VOICE.state === 'recording' || VOICE.state === 'asr') return   // 不打断用户正在进行的输入
+  voiceCancelScheduledSpeak()
   const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 24))
   VOICE.lastSpokenKey = key; VOICE.lastSpokenItem = item; VOICE.surface = surface
-  vElStop(); vRevokePref(); VOICE.segMode = null
+  // 新回复顶替旧播报：三种引擎都先停干净，避免旧回复在下面拿稿/预取期间继续出声
+  vWaStop(); vElStop(); ttsStop(true); vRevokePref(); VOICE.segMode = null
   VOICE.userPaused = false; VOICE.curBuf = null; VOICE.curSeg = null; VOICE.pausedOffset = 0
   vSetState('speaking')   // 先占状态；拿稿期间显示"整理口语稿…"
   if (surface === 'voice') vFlash('整理口语稿…')
@@ -8740,7 +8872,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false), 'mode-ov': () => ovSet('mode-ov', false), 'script-ov': () => ovSet('script-ov', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false), 'mode-ov': () => ovSet('mode-ov', false), 'script-ov': () => ovSet('script-ov', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }

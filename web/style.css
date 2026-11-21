@@ -141,7 +141,7 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .list-seg {
   display:flex; gap:4px; margin: 10px 12px 6px;
   background: var(--bg-card); border-radius: 11px; padding: 3px;
-  max-width: 756px;  /* 与会话卡（.swipe-wrap）同一内容列：12px 侧边距，宽屏同样 756px 居中 */
+  max-width: 756px;  /* 与会话卡同一内容列：12px 侧边距，宽屏同样 756px 居中 */
 }
 @media (min-width:700px) { .list-seg { margin-left:auto; margin-right:auto; } }
 .seg-btn {
@@ -163,12 +163,28 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 .session-card .s-ws + .s-meta { margin-left:0; }
 
 .session-card {
-  margin: 0 12px 10px; padding: 14px 16px;
+  margin: 0 12px 10px; padding: 12px 8px 12px 16px;
   background: var(--bg-card); border-radius: 18px;
   border: .5px solid var(--line);
-  display:flex; flex-direction:column; gap:7px;
+  display:flex; flex-direction:row; align-items:center; gap:2px;
   cursor:pointer;
 }
+.s-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:7px; }
+/* 右侧常驻操作入口：44px 热区 + 30px 可见圆点，一眼知道能点 */
+.s-dots {
+  flex:none; width:44px; height:44px; border:0; border-radius:50%; background:transparent;
+  padding:0; display:flex; align-items:center; justify-content:center;
+  color:var(--text-2); cursor:pointer;
+}
+.s-dot-circle {
+  width:30px; height:30px; border-radius:50%; border:.5px solid var(--line);
+  background:var(--bg-card-2); color:var(--text-2);
+  display:flex; align-items:center; justify-content:center;
+  transition: transform .16s var(--ease-out), background-color .16s ease, color .16s ease;
+}
+.s-dot-circle .ic { display:flex; align-items:center; justify-content:center; }
+.s-dots:active .s-dot-circle { transform:scale(.92); background:var(--accent-soft); color:var(--accent); }
+.s-dots[aria-expanded="true"] .s-dot-circle { background:var(--accent-soft); color:var(--accent); }
 /* 全局搜索（消息内容命中）：与 session-card 同族，但更收敛——标题一行 + 摘要两行 + 工作区提示 */
 .glob-head { margin-top: 4px; }
 .glob-hit {
@@ -1299,23 +1315,30 @@ html.light .stale-strip .st-x { background:rgba(154,74,6,.12); }
 /* ============ 会话长按操作单 ============ */
 .sess-menu-title { padding:2px 20px 8px; font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
 
-/* ============ 会话卡左滑操作（iOS Mail 式） ============ */
-.swipe-wrap { position:relative; overflow:hidden; margin:0 12px 10px; border-radius:18px; touch-action: pan-y; }
-/* touch-action:pan-y——纵向滚动归浏览器（滚了就 touchcancel、卡片弹回原位），横向手势归 JS（左滑出操作）；
-   方向仲裁交给系统，不再靠 8px 阈值抢判，斜向滚动不会再把卡片拖歪 */
-.swipe-actions { position:absolute; top:0; right:0; bottom:0; display:flex; border-radius:18px; overflow:hidden; }
-.swipe-act {
-  width:58px; border:none; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;
-  font-size:10.5px; font-weight:600; min-height:100%; padding:0;
-}
-.swipe-act .sa-ico { font-size:17px; }
-.swipe-act:active { filter:brightness(1.25); }
-.swipe-wrap .session-card { margin:0; position:relative; z-index:1; transition:transform .25s var(--ease-out); background:var(--bg-card); }
-.swipe-wrap.dragging .session-card { transition:none; }
+/* ============ 会话卡右侧 ⋯ 菜单（显性入口，竖向操作） ============ */
 /* 防长按选中文字/弹出系统菜单 */
 .session-card, .session-card * { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
-/* 宽屏居中目标改为 wrapper */
-@media (min-width:700px) { .swipe-wrap { max-width:756px; margin-left:auto; margin-right:auto; } }
+@media (min-width:700px) { .session-card { max-width:756px; margin-left:auto; margin-right:auto; } }
+.card-menu-catcher { position:fixed; inset:0; z-index:89; display:none; }
+.card-menu-catcher.show { display:block; }
+.card-menu {
+  position:fixed; z-index:90; width:196px; padding:5px; display:none;
+  background:var(--bg-elev); border:1px solid var(--line); border-radius:14px;
+  box-shadow:0 14px 36px -18px rgba(15,23,42,.34), 0 2px 8px rgba(15,23,42,.07);
+}
+.card-menu.show { display:block; animation:card-menu-in .16s var(--ease-out); }
+@keyframes card-menu-in { from { opacity:0; transform:scale(.96) translateY(-3px); } }
+.card-menu-row {
+  width:100%; min-height:44px; border:0; border-radius:9px; background:transparent;
+  color:var(--text); display:flex; align-items:center; gap:10px;
+  padding:0 11px; font-family:var(--font); font-size:14px; font-weight:600; text-align:left; cursor:pointer;
+}
+.card-menu-row:active { background:var(--bg-card-2); }
+.card-menu-row .ic { flex:none; color:var(--text-2); }
+.card-menu-row.pin .ic { color:var(--orange); }
+.card-menu-row.stop { color:var(--red); }
+.card-menu-row.stop .ic { color:var(--red); }
+.card-menu-sep { height:1px; background:var(--line); margin:4px 8px; }
 
 /* 独立 PWA 的 home 指示条区适配：FAB 与提示 pill 抬到指示条上方（后写覆盖） */
 .fab { bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
@@ -1368,11 +1391,6 @@ html.light .av-more { background:rgba(15,23,42,.05); }
     radial-gradient(120% 100% at 0% 0%, rgba(var(--mint-rgb), .08), transparent 58%),
     var(--bg-card);
 }
-.swipe-wrap .session-card.team-card {
-  background:
-    radial-gradient(120% 100% at 0% 0%, rgba(var(--mint-rgb), .08), transparent 58%),
-    var(--bg-card);
-}
 .team-rail {
   position:absolute; left:0; top:18px; bottom:18px; width:3px;
   border-radius:0 3px 3px 0;
@@ -1387,7 +1405,6 @@ html.light .av-more { background:rgba(15,23,42,.05); }
 .av-stack { display:inline-flex; align-items:center; flex:none; }
 .av-stack .av { box-shadow:0 0 0 2px var(--bg-card); }
 .av-stack .av + .av, .av-stack .av-more { margin-left:-7px; }
-.swipe-wrap .session-card.team-card .av-stack .av { box-shadow:0 0 0 2px var(--bg-card); }
 .tl-main { min-width:0; display:flex; flex-direction:column; gap:1px; font-size:10.5px; line-height:1.3; color:var(--text-3); }
 .tl-main b { font-size:12px; font-weight:650; color:var(--text); }
 .tl-task { margin-left:auto; flex:none; display:inline-flex; align-items:center; gap:5px; font-size:10px; color:var(--mint); font-variant-numeric:tabular-nums; }
