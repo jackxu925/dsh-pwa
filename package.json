@@ -40,7 +40,7 @@
   "main": "lib/index.js",
   "name": "dsh-pwa",
   "type": "module",
-  "version": "1.19.1",
+  "version": "1.20.0",
   "scripts": {
     "release:npm": "expect scripts/publish-npm.exp"
   }
