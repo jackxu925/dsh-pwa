@@ -5076,6 +5076,12 @@ function ttsPrepare(t) {
   x = x.replace(/\n{2,}/g, '\n').replace(/[ \t]+/g, ' ').trim()
   return x
 }
+/* 口语稿完整性：宿主偶发在句中断流（v1.21.0「第一段就被截断」的根因）。
+   客户端再兜一层——不完整的稿子宁可用原文，也绝不念一半就停。 */
+function ttsScriptComplete(t) {
+  const x = String(t || '').trim()
+  return !!x && /[。！？…；!?;]\s*(?:["'”’」』】）)\]]\s*)*$/.test(x)
+}
 /* 按句切段（不用 lookbehind，老 Safari 兼容），每段 ~120-160 字 */
 function ttsChunks(x) {
   const parts = x.replace(/([。！？；!?;\n])/g, '$1\u0001').split('\u0001').map((t) => t.trim()).filter(Boolean)
@@ -8679,6 +8685,7 @@ async function speakPipeline(s, item, surface) {
       if (r.ok) script = (await r.text()).trim()
       else if (r.status === 401) markAuthExpired()
     } catch (e) { /* 改写失败 → 本地规则兜底 */ }
+    if (script && !ttsScriptComplete(script)) script = null   // 句中断流：退回完整原文，别念一半
     if (!script) script = ttsPrepare(item.text)
     VOICE.scriptCache.set(key, script)
     if (VOICE.scriptCache.size > 60) VOICE.scriptCache.delete(VOICE.scriptCache.keys().next().value)
