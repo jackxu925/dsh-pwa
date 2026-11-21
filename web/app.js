@@ -4861,6 +4861,12 @@ function readReplay() {
   if (!s || !VOICE.lastSpokenItem) return
   readSpeak(s, VOICE.lastSpokenItem)   // 稿走 scriptCache：秒起播
 }
+/* 浮播报条图标（与原型一致：声波动画 + 播放暂停合一 + 语速 + 停止） */
+const BAR_SVG = {
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+}
 function barRender() {
   const bar = $('#tts-bar')
   if (!bar) return
@@ -4869,27 +4875,33 @@ function barRender() {
   bar.textContent = ''
   const paused = VOICE.userPaused || (VOICE.engine === 'system' && TTS.paused)
   let label = paused ? '已暂停' : '正在播报'
-  let icon = paused ? '▶' : '⏸'
+  let ppIcon = paused ? BAR_SVG.play : BAR_SVG.pause
   let aria = paused ? '继续' : '暂停'
   let fn = () => { vibrate(6); vTogglePause() }
-  if (VOICE._barPrep) { label = '整理口语稿…'; icon = '⏸'; aria = '整理口语稿中'; fn = null }
-  else if (VOICE._barDone) { label = '播报完成'; icon = '▶'; aria = '重听'; fn = () => { vibrate(8); readReplay() } }
+  if (VOICE._barPrep) { label = '整理口语稿…'; ppIcon = BAR_SVG.pause; aria = '整理口语稿中'; fn = null }
+  else if (VOICE._barDone) { label = '播报完成'; ppIcon = BAR_SVG.play; aria = '重听'; fn = () => { vibrate(8); readReplay() } }
   bar.classList.toggle('done', !!VOICE._barDone)
   bar.classList.toggle('prep', !!VOICE._barPrep)
-  const pp = el('button', 'tts-pp', icon)
+  // 声波：播放时跳动、暂停收短、整理稿时慢脉动、播完静止
+  const wave = el('span', 'tts-wave')
+  wave.dataset.mode = VOICE._barDone ? 'done' : VOICE._barPrep ? 'prep' : paused ? 'paused' : 'playing'
+  for (let i = 0; i < 5; i++) wave.appendChild(el('i'))
+  const pp = el('button', 'tts-pp')
   pp.type = 'button'
   pp.setAttribute('aria-label', aria)
+  pp.innerHTML = ppIcon
   if (fn) pp.onclick = fn
   else pp.disabled = true
-  const x = el('button', 'tts-x', '✕')
+  const x = el('button', 'tts-x')
   x.type = 'button'
   x.setAttribute('aria-label', '停止朗读')
+  x.innerHTML = BAR_SVG.stop
   x.onclick = () => { vibrate(6); barStop() }
   const rt = el('button', 'tts-rate', fmtRate(TTS.rate))
   rt.type = 'button'
   rt.setAttribute('aria-label', '语速')
   rt.onclick = ttsCycleRate
-  bar.append(pp, el('div', 'tts-info', label), rt, x)
+  bar.append(wave, el('div', 'tts-info', label), pp, rt, x)
 }
 /* 系统引擎播报条与自然管线共用同一个渲染器（ttsSpeak 系调用点保留原函数名） */
 function ttsBar() { barRender() }
@@ -8364,7 +8376,7 @@ function vWaStop() {
   const r = VOICE.wResolve; VOICE.wResolve = null
   try { if (VOICE.wSrc) { VOICE.wSrc.onended = null; try { VOICE.wSrc.stop() } catch (e) {} VOICE.wSrc.disconnect() } } catch (e) {}
   VOICE.wSrc = null; VOICE.wPlaying = false
-  if (r) r(false)
+  if (r) r('stopped')   // 主动停下 ≠ 播放失败：暂停/停止/切段时不该触发系统语音兜底
 }
 function vWaPlay(buf, from) {
   vWaStop()
@@ -8379,6 +8391,7 @@ function vWaPlay(buf, from) {
     VOICE.wOffset = from || 0
     VOICE.wPlaying = true
     try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
+    VOICE.segMode = 'wa'   // 起播即标记：暂停/续播要立刻知道当前是哪个引擎（原先等播完才标记 → 暂停变重播）
     return new Promise((resolve) => {
       VOICE.wResolve = resolve
       src.onended = () => {
@@ -8408,7 +8421,7 @@ function vElStop() {
   const r = VOICE.elResolve; VOICE.elResolve = null
   try { if (VOICE.el) { VOICE.el.onended = null; VOICE.el.pause() } } catch (e) {}
   VOICE.elActive = false
-  if (r) r(false)
+  if (r) r('stopped')   // 同上：主动暂停/停止不算失败
 }
 function vElPlay(seg, from) {
   const el = VOICE.el
@@ -8422,6 +8435,7 @@ function vElPlay(seg, from) {
     try { el.currentTime = from || 0 } catch (e) {}
     VOICE.elActive = true
     const p = el.play()
+    VOICE.segMode = 'el'   // 同上：起播即标记
     return new Promise((resolve) => {
       const done = (ok) => {
         if (VOICE.elResolve === done) VOICE.elResolve = null
@@ -8436,11 +8450,12 @@ function vElPlay(seg, from) {
   } catch (e) { return Promise.resolve(false) }
 }
 function vPlaySeg(seg, from) {
-  const viaWa = () => vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+  const viaWa = () => vWaPlay(seg.buf, from).then((r2) => { if (r2 === true) VOICE.segMode = 'wa'; return r2 })
   // 元素优先（已解锁时）：不依赖 AudioContext 状态、锁屏可续、保调加速一并以播放速率实现
   if (VOICE.elReady && seg.url) {
     return vElPlay(seg, from).then((ok) => {
-      if (ok) { VOICE.segMode = 'el'; return true }
+      if (ok === true) { VOICE.segMode = 'el'; return true }
+      if (ok === 'stopped') return 'stopped'
       return viaWa()
     })
   }
@@ -8450,8 +8465,9 @@ function vRunSeg(key, from) {
   const seg = VOICE.curSeg
   if (!seg) return
   vPlaySeg(seg, from).then((ok) => {
+    if (ok === 'stopped') return   // 暂停/停止/切段：由调用方接管，不算失败
     if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
-    if (!ok) { vFallbackSystem(key); return }   // 两个引擎都起不来 → 系统语音兜底，绝不把浮条留在"正在播报"
+    if (ok !== true) { vFallbackSystem(key); return }   // 两个引擎都真起不来 → 系统语音兜底，绝不把浮条留在"正在播报"
     VOICE.pi++
     vSyncDeck()
     vPlayNext(key)
@@ -8496,10 +8512,14 @@ function VCOOK(status, item, script) {
   VOICE.lastScriptKey = VOICE.lastSpokenKey
 }
 function vTogglePause() {
+  vArmAudio()   // 继续播放在手势里发生：顺手把两个引擎重新解锁，避免长暂停后 context 已挂起
   if (VOICE.engine === 'system') { ttsPauseResume(); vSetState('speaking'); return }
   if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
-    if (VOICE.el.paused) { try { VOICE.el.play() } catch (e) {} VOICE.userPaused = false; vResumeCue() }
-    else { try { VOICE.el.pause() } catch (e) {} VOICE.userPaused = true; vPauseCue() }
+    if (VOICE.el.paused) {
+      VOICE.userPaused = false; vResumeCue()
+      const pp = VOICE.el.play()
+      if (pp && pp.catch) pp.catch(() => { if (!VOICE.userPaused) vRunSeg(VOICE.lastSpokenKey, VOICE.pausedOffset || 0) })
+    } else { try { VOICE.el.pause() } catch (e) {} VOICE.userPaused = true; vPauseCue() }
     vSetState('speaking')
     return
   }
