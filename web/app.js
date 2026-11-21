@@ -322,6 +322,12 @@ function sess(id) {
       questions: new Map(),            // eventId → {rpcId, questions, outcome}
       callArgs: new Map(),             // callId → {name, args}
       lastPreview: '',
+      lastPrompt: '',                  // 本轮提问：运行中卡片第一行（事件流/投影两路覆盖）
+      livePreview: '',                 // 本轮 Agent 最新文字：运行中卡片第二块（尾部补拉）
+      turn: null,                      // 最近一轮编号：过滤掉上一轮的旧回复
+      turnOpen: false,                 // 投影里最后一轮是否还没收尾（运行中卡片只认这一轮）
+      _liveAsOf: 0,                    // 已取到哪一帧的尾部预览（去重）
+      _liveFetching: false,            // 同一会话同时只拉一次尾部
       permissions: null,               // 宿主投影 {currentValue}；旧版宿主可能自带 options
       models: null,                    // session/modelCatalog 缓存
       modelSel: null,                  // 当前模型选择 {provider,model,reasoningEffort}（modelSelection.next）
@@ -402,6 +408,9 @@ function noteOutlinePreview(s) {
   const arr = Array.isArray(s.turnOutline) ? s.turnOutline : null
   if (!arr || !arr.length) return
   const last = arr[arr.length - 1]
+  if (last && Number.isFinite(last.turn)) s.turn = last.turn
+  if (last && last.prompt) s.lastPrompt = previewText(last.prompt)
+  s.turnOpen = !!(last && last.prompt && !last.response)
   const txt = previewText(last && (last.response || last.prompt))
   if (txt) s.lastPreview = txt
 }
@@ -748,6 +757,7 @@ function foldEvent(s, event, view, opts) {
           const keepImgs = (s.items[i].images && s.items[i].images.length) ? s.items[i].images : (images.length ? images : null)
           s.items[i] = { ...s.items[i], text: text || s.items[i].text, images: keepImgs, pending: false, failed: false, time: event.time }
           s.lastPreview = text || s.lastPreview
+          if (text) s.lastPrompt = previewText(text)
           break
         }
       }
@@ -759,14 +769,22 @@ function foldEvent(s, event, view, opts) {
           const keepImgs2 = (s.items[j].images && s.items[j].images.length) ? s.items[j].images : (images.length ? images : null)
           s.items[j] = { ...s.items[j], text, images: keepImgs2, pending: false, steerEcho: false, failed: false, time: event.time, seq: event.seq, rpcId: rid || s.items[j].rpcId }
           s.lastPreview = text || s.lastPreview
+          if (text) s.lastPrompt = previewText(text)
           break
         }
       }
       s.items.push({ kind: 'user', text, images: images.length ? images : null, time: event.time, seq: event.seq, rpcId: rid || null })
       s._qStale = true   // 「问过的问题」的缓存/计数作废，下次打开重算
       s.lastPreview = text || '[图片]'
+      s.lastPrompt = previewText(text) || '[图片]'
       break
     }
+    case 'turn/start':
+      // 新的一轮开始：上一轮的最新回复不再代表「本轮」，先清掉，等尾部补拉到本轮文字
+      s.turn = d.turn
+      s.turnOpen = true
+      s.livePreview = ''
+      break
     case 'step/start':
       // 一步开始：记下发请求的时刻，用来算 TTFT
       s._step = { turn: d.turn, step: d.step, start: event.time, first: null }
@@ -815,6 +833,7 @@ function foldEvent(s, event, view, opts) {
       if (!text.trim()) { s._thinkBuf = (s._thinkBuf || '') + reasoning; break }
       s.items.push({ kind: 'assistant', mid: m.id || null, text, reasoning: takeThinkBuf(s) + reasoning, time: event.time, seq: event.seq, turn: d.turn, usage: d.usage || null })
       s.lastPreview = text
+      s.livePreview = text
       prevDirtyClear(s.id)
       break
     }
@@ -883,6 +902,7 @@ function foldEvent(s, event, view, opts) {
       break
     case 'turn/end': {
       s.running = false
+      s.turnOpen = false
       if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
       // 自动朗读（三态版）：语音=对讲全链路；朗读=同一管线的浮条表面。只播实时轮——
       // 重连快照里的历史 turn/end 不能把旧回复再播一遍（main 的 historical 守卫）。
@@ -2697,6 +2717,36 @@ function teamCardLine(s, st) {
   line.append(stack, mid, task)
   return line
 }
+/* 运行中卡片：提问 1 行 + 本轮 Agent 最新文字 2 行（没有文字就思考态）。
+   与 chat 里「你/它」的层级一致；空着比拿上一轮冒充更诚实。 */
+function runningPreviewNode(s, question) {
+  const wrap = el('div', 'sr-wrap')
+  const q = previewText(question)
+  if (q) {
+    const row = el('div', 'sr-row sr-you')
+    row.appendChild(el('span', 'sr-k', '你'))
+    row.appendChild(el('span', 'sr-you-tx', q))
+    wrap.appendChild(row)
+  }
+  const row = el('div', 'sr-row sr-agent')
+  row.appendChild(el('span', 'sr-k', 'Agent'))
+  const box = el('div', 'sr-a-box')
+  const text = previewText(s.livePreview)
+  if (text) {
+    box.appendChild(el('span', 'sr-a-tx', text))
+  } else {
+    const think = el('div', 'sr-think')
+    const dots = el('span', 'sr-dots')
+    dots.appendChild(el('b')); dots.appendChild(el('b')); dots.appendChild(el('b'))
+    think.appendChild(dots)
+    think.appendChild(el('span', null, '正在思考…'))
+    box.appendChild(think)
+    box.appendChild(el('div', 'sr-skel'))
+  }
+  row.appendChild(box)
+  wrap.appendChild(row)
+  return wrap
+}
 function sessionCard(s, showWs) {
   const card = el('div', 'session-card')
   card.setAttribute('role', 'button')
@@ -2714,14 +2764,19 @@ function sessionCard(s, showWs) {
   }
   row1.appendChild(el('span', 's-time', fmtTime(s.updatedAt)))
   main.appendChild(row1)
-  // 第二行只放“最后一条消息”摘要；不再把绝对路径当预览。没有摘要时宁缺毋滥，
-  // 空白的新会话给一句「还没有消息」，其余交给行尾的工作区标签补上下文。
-  const prev = previewText(s.lastPreview)
-  if (prev) main.appendChild(el('div', 's-preview', prev))
-  else if (s.blank) main.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
-  else if (!showWs) {
-    const wl = wsLabelOf(s)
-    if (wl) main.appendChild(el('div', 's-preview s-preview-empty', wl))
+  // 第二行只放“最后一条消息”摘要；运行中换成「你一句 + Agent 最新一句（2 行）」。
+  // 没有摘要时宁缺毋滥，空白的新会话给一句「还没有消息」。
+  const runQuestion = s.running && s.turnOpen ? (s.lastPrompt || s.lastPreview) : ''
+  if (s.running && s.turnOpen && (runQuestion || s.livePreview)) {
+    main.appendChild(runningPreviewNode(s, runQuestion))
+  } else {
+    const prev = previewText(s.lastPreview)
+    if (prev) main.appendChild(el('div', 's-preview', prev))
+    else if (s.blank) main.appendChild(el('div', 's-preview s-preview-empty', '还没有消息'))
+    else if (!showWs) {
+      const wl = wsLabelOf(s)
+      if (wl) main.appendChild(el('div', 's-preview s-preview-empty', wl))
+    }
   }
   // Lead 卡上的团队信号：成员头像 + 运行中人数 + 任务进度；子会话不铺进主列表。
   if (teamCard) {
@@ -3625,13 +3680,77 @@ async function refreshPreview(s, asOf) {
       if (e.type !== 'assistant/message') continue
       const text = ((e.data && (e.data.message ? e.data.message.content : e.data.content)) || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('').trim()
       if (text) {
-        if (S.current !== s.id) { s.lastPreview = text.slice(0, 80); renderListSoon() }
+        if (S.current !== s.id) { s.lastPreview = text.slice(0, 80); s.livePreview = ''; renderListSoon() }
         prevDirtyClear(s.id)
         break
       }
     }
   } catch (e) { /* 下次轮询再试 */ }
   s._tailFetching = false
+}
+/* 运行中卡片的第二块：按本轮 turn 在尾部事件里找最新一条有字的 assistant/message，
+   找不到就是「正在思考」；只在列表页可见时按活动事件节流批量拉。 */
+let runningPreviewTimer = null
+let runningPreviewBusy = false
+function supportsRunningPreview() {
+  if (S.current) return false
+  if (document.visibilityState === 'hidden') return false
+  const view = $('#view-list')
+  return !!view && view.classList.contains('active')
+}
+function scheduleRunningPreviews(delay) {
+  if (runningPreviewTimer) return
+  if (!supportsRunningPreview()) return
+  runningPreviewTimer = setTimeout(() => {
+    runningPreviewTimer = null
+    refreshRunningPreviews()
+  }, delay || 2500)
+}
+async function refreshRunningPreviews() {
+  if (runningPreviewBusy || !supportsRunningPreview()) return
+  runningPreviewBusy = true
+  try {
+    const list = await rpc('session/list', { _request: { limit: 40 } })
+    const jobs = []
+    for (const item of list.items || []) {
+      if (!item.running || item.origin === 'subagent') continue
+      if (S.current === item.sessionId) continue
+      const s = S.sessions.get(item.sessionId)
+      if (!s) continue
+      // 列表投影是 turn/prompt 的最新来源：先对齐，再按本轮取尾部文字
+      applyListValues(s, item.projections && item.projections.values)
+      const asOf = (item.projections && item.projections.asOfSeq) || 0
+      if (!asOf || s.turn == null || !s.turnOpen) continue
+      if (s._liveAsOf === asOf) continue
+      jobs.push(fetchLivePreview(s, asOf))
+    }
+    if (jobs.length) await Promise.allSettled(jobs)
+  } catch (e) { /* 下一轮活动事件再试 */ }
+  runningPreviewBusy = false
+}
+async function fetchLivePreview(s, asOf) {
+  if (!s || s._liveFetching || !asOf || !s.turnOpen) return
+  if (s._liveAsOf === asOf) return
+  if (!supportsRunningPreview()) return
+  s._liveFetching = true
+  try {
+    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 32 } })
+    const recs = (pg.records || []).map((r) => r.event || r).filter(Boolean)
+    let text = ''
+    for (let i = recs.length - 1; i >= 0; i--) {
+      const e = recs[i]
+      if (e.type !== 'assistant/message') continue
+      const turn = e.data && e.data.turn
+      if (s.turn != null && turn != null && turn !== s.turn) continue
+      const raw = textOf((e.data && (e.data.message ? e.data.message.content : e.data.content)) || [])
+      if (raw.trim()) { text = previewText(raw); break }
+    }
+    if (S.current === s.id || !s.running) return
+    s.livePreview = text
+    s._liveAsOf = asOf
+    renderListSoon()
+  } catch (e) { /* 下一轮活动事件再试 */ }
+  s._liveFetching = false
 }
 async function loadBase() {
   try {
@@ -3654,6 +3773,8 @@ async function loadBase() {
       if (s.subagent) continue
       // 后台跑完了 / 上一条还是提问文本：补拉尾部把预览换成回答（会话正开着的不用，fold 会实时换）
       if (S.current !== item.sessionId && !s.running && s.asOfSeq > 0 && (wasRunning || prevDirtyGet().has(item.sessionId))) refreshPreview(s, s.asOfSeq)
+      // 运行中：首屏先取一次本轮助手文字；后续由活动事件节流刷新
+      if (S.current !== item.sessionId && s.running && s.asOfSeq > 0 && s.turn != null && s.turnOpen) fetchLivePreview(s, s.asOfSeq)
     }
     linkChildModes()
     // workspace/follow 已提供权威分组（含真实标题/顺序/归档）；仅在还没有时退回 cwd 推导
@@ -3662,6 +3783,7 @@ async function loadBase() {
     S.listLoaded = true
     setConn('online')
     renderList()
+    scheduleRunningPreviews(900)
     // 冷启动直接开子会话/团队会话时，父目录与成员名可能比会话本身晚落地：补刷一次标题/谱系
     const cur = S.current && S.sessions.get(S.current)
     if (cur && (cur.subagent || hasTeamView(cur))) {
@@ -4219,6 +4341,19 @@ Mux.handlers.events = (v) => {
         const wasRunning = s.running
         s.running = !!a[1]
         if (s.running) s.agentAvailable = true   // running 必然持有活 Agent
+        if (!wasRunning && s.running) {
+          // 新一轮开始：先立住提问 + 思考态，尾部补拉随后到（旧轮回复不能顶上来）
+          s.livePreview = ''
+          s.turnOpen = false
+          s._liveAsOf = 0
+        }
+        if (wasRunning && !s.running) {
+          // 先拿本轮最后一条文字顶上，避免退回提问文本闪一下；正式收尾仍走 refreshPreview
+          if (s.livePreview) s.lastPreview = s.livePreview
+          s.livePreview = ''
+          s.turnOpen = false
+          s._liveAsOf = 0
+        }
         if (S.current === s.id) refreshChatChrome(s)
         // 成员跑没跑起来要反映在 Lead 的团队条/团队面板上（子会话状态不会冒泡成父会话事件）
         const root = teamRootOf(s)
@@ -4226,6 +4361,7 @@ Mux.handlers.events = (v) => {
         else if (teamSheetRoot && root && teamSheetRoot === root.id) renderTeamSheet()
         // 后台跑完了：列表预览还停在提问文本上——立即补拉尾部换成回答（asOfSeq 可能滞后，不带上限）
         if (wasRunning && !s.running && S.current !== s.id && !s.subagent) refreshPreview(s, 0)
+        if (s.running && !s.subagent) scheduleRunningPreviews(900)
         renderListSoon()
         break
       }
@@ -4240,6 +4376,7 @@ Mux.handlers.events = (v) => {
       }
       case 'api-session/activity': {
         const s = sess(a[0]); s.updatedAt = a[1] || Date.now()
+        if (s.running && !s.subagent) scheduleRunningPreviews(2500)
         renderListSoon()
         break
       }
@@ -6011,6 +6148,8 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   s.items.push(item)
   s.updatedAt = Date.now()
   s.lastPreview = text || '[图片]'
+  s.lastPrompt = previewText(text) || '[图片]'
+  if (!s.running) s.livePreview = ''   // 空闲发新消息=新一轮；旧回复不能挂在新提问下面
   prevDirtyMark(id)   // 预览现在停在提问文本上；回答落地（follow 折叠或后台补拉）后清除
   s.follow = true  // 自己发消息：必然想看到最新
   ttsStop()   // 开口说话比听更重要：发消息即停朗读
