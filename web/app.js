@@ -7900,7 +7900,16 @@ const vDone = () => vCue(() => { vTone(880, 0, .09, .13); vTone(587, .11, .13, .
 const vDiscard = () => vCue(() => vTone(420, 0, .09, .14, 'triangle'))
 const vPauseCue = () => vCue(() => vTone(560, 0, .05, .11))
 const vResumeCue = () => vCue(() => vTone(740, 0, .05, .11))
-document.addEventListener('click', vUnlock, { passive: true })
+/* iOS 音频解锁：朗读模式是「自动播报」——播报开始那一刻没有用户手势，只能靠此前
+ * 任意一次点击/触摸把两个引擎备好（WebAudio context + <audio> 元素）。重启 PWA 后
+ * 模式从 localStorage 恢复，选模式那一拍的手势早没了；不解锁就会静默卡在"正在播报"。 */
+let vWarmed = false
+function vArmAudio() {
+  vUnlock(); vUnlockEl()
+  if (!vWarmed) { vWarmed = true; try { ttsWarm() } catch (e) {} }
+}
+document.addEventListener('click', vArmAudio, { passive: true })
+document.addEventListener('pointerdown', vArmAudio, { passive: true })
 /* ---- 状态渲染 ---- */
 const V_WORDS = { idle: '就绪', recording: '在听', asr: '识别中…', thinking: '发送中…', speaking: '正在播报' }
 function vFlash(t, shake) {
@@ -8024,7 +8033,7 @@ function vWakeRelease() {
   try { vWakeLock.release() } catch (e) {}
   vWakeLock = null
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) voiceWakeLock() })
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { voiceWakeLock(); vArmAudio() } })
 /* ---- 按压手势：录音 / 上滑取消 / 轻点暂停 / 打断 ---- */
 function vOnDown(e) {
   if (VOICE.state === 'recording') return
@@ -8307,16 +8316,27 @@ function vPlayNext(key) {
 }
 function vSysWatch(key) {
   clearInterval(VOICE.sysPoll)
+  let silent = 0
+  const finish = () => {
+    clearInterval(VOICE.sysPoll)
+    if (VOICE.state !== 'speaking') return
+    vDone(); vibrate([12, 80, 12]); VOICE.paras = []; VOICE.pi = 0
+    if (VOICE.surface === 'bar') { VOICE.state = 'idle'; barDone() }
+    else vSetState('idle')
+  }
   VOICE.sysPoll = setInterval(() => {
     if (VOICE.engine !== 'system' || VOICE.lastSpokenKey !== key) { clearInterval(VOICE.sysPoll); return }
-    if (!TTS.on) {   // ttsPlayIdx 播完会自己 ttsStop
-      clearInterval(VOICE.sysPoll)
-      if (VOICE.state === 'speaking') {
-        vDone(); vibrate([12, 80, 12]); VOICE.paras = []; VOICE.pi = 0
-        if (VOICE.surface === 'bar') { VOICE.state = 'idle'; barDone() }
-        else vSetState('idle')
+    if (!TTS.on) { finish(); return }   // ttsPlayIdx 播完会自己 ttsStop
+    // 系统语音被浏览器静默丢弃（iOS 无手势唤醒时常见：speak() 既不回调也不出声）：
+    // 连续 2.5 秒既不在说、也不在排队 → 直接收尾，绝不把浮条永久留在"正在播报"。
+    const sp = window.speechSynthesis
+    if (sp && !sp.speaking && !sp.pending) {
+      silent++
+      if (silent >= 10) {
+        ttsStop(true); finish()
+        if (VOICE.surface === 'bar') toast('自动播报被浏览器拦截 · 点 ▶ 重听', true)   // 点按是新手势，必能出声
       }
-    }
+    } else silent = 0
   }, 250)
 }
 /* ---- 播放层：默认 Web Audio（已解锁、无手势限制）；加速时改用 <audio> 元素 ----
@@ -8349,23 +8369,36 @@ function vWaStop() {
 function vWaPlay(buf, from) {
   vWaStop()
   if (!VAC || !buf) return Promise.resolve(false)
+  const go = () => {
+    const src = VAC.createBufferSource()
+    src.buffer = buf
+    src.playbackRate.value = 1    // 音高保护：WebAudio 不做变速（变速交给 <audio> 元素）
+    src.connect(VAC.destination)
+    VOICE.wSrc = src
+    VOICE.wStartAt = VAC.currentTime
+    VOICE.wOffset = from || 0
+    VOICE.wPlaying = true
+    try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
+    return new Promise((resolve) => {
+      VOICE.wResolve = resolve
+      src.onended = () => {
+        if (VOICE.wResolve === resolve) VOICE.wResolve = null
+        if (VOICE.wSrc === src) { VOICE.wSrc = null; VOICE.wPlaying = false }
+        resolve(true)
+      }
+    })
+  }
+  if (VAC.state === 'running') return go()
+  /* context 被挂起（iOS 自动播报无手势 / 后台切回）：resume 是异步的，先给它 600ms；
+     仍然挂起就返回 false——上层会降级系统语音，而不是对着静音 context 无限等 onended。 */
   try { VAC.resume().catch(() => {}) } catch (e) {}
-  const src = VAC.createBufferSource()
-  src.buffer = buf
-  src.playbackRate.value = 1    // 音高保护：WebAudio 不做变速（变速交给 <audio> 元素）
-  src.connect(VAC.destination)
-  VOICE.wSrc = src
-  VOICE.wStartAt = VAC.currentTime
-  VOICE.wOffset = from || 0
-  VOICE.wPlaying = true
-  try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
   return new Promise((resolve) => {
-    VOICE.wResolve = resolve
-    src.onended = () => {
-      if (VOICE.wResolve === resolve) VOICE.wResolve = null
-      if (VOICE.wSrc === src) { VOICE.wSrc = null; VOICE.wPlaying = false }
-      resolve(true)
-    }
+    const t0 = Date.now()
+    ;(function poll() {
+      if (VAC.state === 'running') { resolve(go()); return }
+      if (Date.now() - t0 > 600) { resolve(false); return }
+      setTimeout(poll, 60)
+    })()
   })
 }
 function vWaElapsed() {
@@ -8403,20 +8436,22 @@ function vElPlay(seg, from) {
   } catch (e) { return Promise.resolve(false) }
 }
 function vPlaySeg(seg, from) {
-  if (TTS.rate !== 1 && VOICE.elReady) {
+  const viaWa = () => vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+  // 元素优先（已解锁时）：不依赖 AudioContext 状态、锁屏可续、保调加速一并以播放速率实现
+  if (VOICE.elReady && seg.url) {
     return vElPlay(seg, from).then((ok) => {
       if (ok) { VOICE.segMode = 'el'; return true }
-      return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+      return viaWa()
     })
   }
-  return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+  return viaWa()
 }
 function vRunSeg(key, from) {
   const seg = VOICE.curSeg
   if (!seg) return
   vPlaySeg(seg, from).then((ok) => {
-    if (!ok) return
     if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+    if (!ok) { vFallbackSystem(key); return }   // 两个引擎都起不来 → 系统语音兜底，绝不把浮条留在"正在播报"
     VOICE.pi++
     vSyncDeck()
     vPlayNext(key)
@@ -8549,14 +8584,14 @@ function applyMode(id, m) {
       if (VOICE.state === 'speaking') { VOICE.surface = 'bar'; VOICE._barHold = true; barPlayShow() }
       toast('朗读模式 · 麦克风已收起，播报继续')
     } else {
-      vUnlock(); vUnlockEl(); ttsWarm()
+      vArmAudio()   // 借这次点击把手势窗口里的两个引擎都备好（自动播报本身没有手势）
       toast('朗读模式 · 回答将自动朗读')
     }
   } else if (m === 'voice') {
     if (VOICE.state === 'speaking' && VOICE.surface === 'bar') VOICE.surface = 'voice'   // 播报随表面迁移，不打断
     VOICE._barHold = false; VOICE._barPrep = false; VOICE._barDone = false
     barRender(); vSetState(VOICE.state)
-    vUnlock(); vUnlockEl(); vTick(); ttsWarm()
+    vArmAudio(); vTick()
     toast(micAvailable() ? '语音模式：按住说话，松手发送' : '语音模式（麦克风需 HTTPS 访问）')
   }
   if (s) refreshChatChrome(s)
