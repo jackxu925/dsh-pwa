@@ -296,7 +296,7 @@ const S = {
   listLoaded: false,        // 首次 session/list 是否已落地（空态分岔用）
   staleNotice: null,        // 断线期间失效的审批/提问计数（重连后挂条提示，可手动关掉）
   authExpired: false,       // rpc 401 → 顶部常驻横幅（PWA cookie 隔离时给出明确出路）
-  glob: { q: '', seq: 0, timer: 0, loading: false, error: false, results: [], hasMore: false },  // 全局搜索（session/search 搜消息内容）
+  glob: { q: '', seq: 0, timer: 0, poll: 0, polls: 0, loading: false, error: false, results: [], hasMore: false, building: false, indexed: 0, total: 0 },  // 全局搜索（本地消息索引 /api/pwa.search；旧宿主回退 session/search）
   es: { mux: null },
   wfClient: null,           // $events ready 帧下发的 clientId（waterfall 应答要用）
   permCatalog: null,        // 进程级权限目录（permissionPresets/catalog）：选项不在会话投影里
@@ -1924,7 +1924,8 @@ function renderList() {
   const wrap = $('#session-list')
   if (!wrap) return
   wrap.textContent = ''
-  const q = ($('#search').value || '').toLowerCase()
+  const qRaw = ($('#search').value || '').trim()
+  const q = qRaw.toLowerCase()
   let visible = [...S.sessions.values()]
     .filter((s) => !s.blank || s.running || s.title || s.createdHere)
     .filter((s) => !s.subagent)
@@ -1961,14 +1962,19 @@ function renderList() {
     // 冷启动列表未落地时也不给结论，给加载态
     if (q) {
       const box = el('div', 'empty-state')
-      box.appendChild(el('div', null, '没有标题或路径含「' + q + '」的会话'))
-      box.appendChild(el('div', 'empty-sub', (S.glob.loading && S.glob.q === q) ? '正在搜索消息内容…' : '看看下面的消息内容结果'))
+      box.appendChild(el('div', null, '没有标题或路径含「' + qRaw + '」的会话'))
+      const waiting = S.glob.loading && S.glob.q === qRaw
+      const indexing = S.glob.building && (S.glob.total === 0 || S.glob.indexed < S.glob.total)
+      const sub = indexing && S.glob.q === qRaw
+        ? (S.glob.total ? '正在建立消息索引（' + S.glob.indexed + '/' + S.glob.total + '）…' : '正在准备消息搜索…')
+        : waiting ? '正在搜索消息内容…' : '看看下面的消息内容结果'
+      box.appendChild(el('div', 'empty-sub', sub))
       const clear = el('button', 'empty-clear', '清除搜索')
       clear.type = 'button'
       clear.onclick = () => { const inp = $('#search'); if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })) } vibrate(8) }
       box.appendChild(clear)
       wrap.appendChild(box)
-      renderGlobSection(wrap, q, false)
+      renderGlobSection(wrap, qRaw, false)
       return
     }
     if (!S.listLoaded) {
@@ -1980,10 +1986,10 @@ function renderList() {
   }
   // 「继续上次会话」置顶入口已移除：两级工作区视图 + 「最近活跃」时间视图都能一步直达最近对话
   // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接；
-  // 本地命中（标题/路径）之下再拼一段「消息内容命中」（session/search 全局搜正文）
+  // 本地命中（标题/路径）之下再拼一段「消息内容命中」（本地消息索引 / api）
   if (q) {
     for (const s of visible) wrap.appendChild(sessionCard(s, true))
-    renderGlobSection(wrap, q, true)
+    renderGlobSection(wrap, qRaw, true)
     return
   }
   // 按时间视图：置顶会话单独成组放在最前，其余按最近活跃降序，
@@ -2045,14 +2051,40 @@ function renderList() {
   setListTitle(null)
   for (const entry of wsSorted) wrap.appendChild(wsRow(entry))
 }
-/* ---- 全局搜索（消息内容）：session/search 只回 sessionId + snippet，本地拼一层轻 UI ----
-   本地过滤管标题/工作区路径；这里管正文。350ms 防抖 + seq 乱序守卫；失败静默降级（不打断本地结果）。 */
+/* ---- 全局搜索（消息内容）：PWA 本地字符索引（/api/pwa.search） ----
+   宿主的 session/search 用 FTS5 unicode61，中文整段是一个 token（旺佳旺 搜不到
+   海口万达旺佳旺超市），且冷索引在有会话写入时永远不收敛。手机端改用宿主进程里
+   的本地索引：只回 sessionId + snippet，这里拼一层轻 UI。
+   350ms 防抖 + seq 乱序守卫；索引建立中会每 2.5s 取一次增量结果。
+   旧宿主没有该路由时回退 session/search（404/405）。 */
+async function pwaContentSearch(q) {
+  let r
+  try {
+    r = await fetch('/api/pwa.search', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: q }),
+      signal: AbortSignal.timeout(20000),
+    })
+  } catch (e) {
+    return null   // 连接失败：交给旧通道再试一次，别把搜索卡死在本地
+  }
+  if (r.status === 404 || r.status === 405 || r.status === 501) return null
+  if (!r.ok) throw new Error('content search: HTTP ' + r.status)
+  return await r.json()
+}
 function scheduleGlobSearch() {
   const q = ($('#search').value || '').trim()
   const g = S.glob
   g.q = q
   clearTimeout(g.timer)
-  if (q.length < 2) { g.seq++; g.loading = false; g.error = false; g.results = []; g.hasMore = false; return }
+  clearTimeout(g.poll)
+  g.polls = 0
+  if (q.length < 2) {
+    g.seq++; g.loading = false; g.error = false; g.results = []; g.hasMore = false
+    g.building = false; g.indexed = 0; g.total = 0
+    return
+  }
   g.timer = setTimeout(runGlobSearch, 350)
 }
 async function runGlobSearch() {
@@ -2061,21 +2093,32 @@ async function runGlobSearch() {
   const seq = ++S.glob.seq
   S.glob.loading = true
   try {
-    const v = await rpc('session/search', { request: { query: q } })
+    let v = await pwaContentSearch(q)
+    if (v === null) v = await rpc('session/search', { request: { query: q } })
     if (seq !== S.glob.seq) return   // 输入已前进：丢弃过期响应
     S.glob.loading = false; S.glob.error = false
     S.glob.results = (v && v.items) || []
     S.glob.hasMore = !!(v && v.hasMore)
+    S.glob.building = !!(v && v.building)
+    S.glob.indexed = Number(v && v.indexed) || 0
+    S.glob.total = Number(v && v.total) || 0
+    // 索引还在后台建立：结果先出，等增量补齐；同一个词最多续 160 次（约 6 分钟）
+    if (S.glob.building && S.glob.q === q && S.glob.polls < 160) {
+      S.glob.polls++
+      clearTimeout(S.glob.poll)
+      S.glob.poll = setTimeout(() => { if (S.glob.q === q) runGlobSearch() }, 2500)
+    }
   } catch (e) {
     if (seq !== S.glob.seq) return
-    S.glob.loading = false; S.glob.error = true; S.glob.results = []; S.glob.hasMore = false
+    S.glob.loading = false; S.glob.error = true; S.glob.results = []; S.glob.hasMore = false; S.glob.building = false
   }
   if (S.glob.q === q) renderListSoon()
 }
 /* 搜索视图里拼「消息内容命中」段；hasLocal=本地标题/路径已有命中（无命中时的提示才不重复） */
 function renderGlobSection(wrap, q, hasLocal) {
   const g = S.glob
-  if (g.loading || g.q !== q) {   // 防抖窗内/请求在途：q 已变但旧结果还没作废，先标搜索中
+  // 防抖窗内/请求在途且还没有结果：先标搜索中；轮询增量时保留已有结果，避免闪断
+  if (g.q !== q || (g.loading && !(g.results || []).length)) {
     const head = el('div', 'ws-group glob-head')
     head.appendChild(icon('search', 14))
     head.appendChild(el('span', null, '消息内容 · 搜索中…'))
@@ -2087,15 +2130,24 @@ function renderGlobSection(wrap, q, hasLocal) {
     return
   }
   const hits = (g.results || []).filter((h) => h && h.sessionId)
+  const indexing = !!g.building && (g.total === 0 || g.indexed < g.total)
+  const progress = indexing && g.total ? g.indexed + '/' + g.total : ''
   if (!hits.length) {
+    if (indexing) {
+      wrap.appendChild(el('div', 'empty-sub glob-none', g.total
+        ? '正在建立消息索引（' + progress + '），结果会边建边出'
+        : '正在准备消息搜索…'))
+      return
+    }
     if (!hasLocal) wrap.appendChild(el('div', 'empty-sub glob-none', '消息内容里也没有命中'))
     return
   }
   const head = el('div', 'ws-group glob-head')
   head.appendChild(icon('search', 14))
-  head.appendChild(el('span', null, '消息内容命中（' + hits.length + (g.hasMore ? '+' : '') + '）'))
+  head.appendChild(el('span', null, '消息内容命中（' + hits.length + (g.hasMore ? '+' : '') + '）' + (progress ? ' · 索引中 ' + progress : '')))
   wrap.appendChild(head)
   for (const h of hits.slice(0, 20)) wrap.appendChild(globHitNode(h, q))
+  if (progress) wrap.appendChild(el('div', 'empty-sub glob-none', '正在建立完整索引（' + progress + '），结果会继续补进来'))
   if (g.hasMore) wrap.appendChild(el('div', 'empty-sub glob-none', '结果较多，试试更具体的关键词'))
 }
 /* 单条命中：会话标题 + 摘要（命中词高亮）+ 工作区提示；点按直达会话 */
