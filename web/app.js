@@ -83,6 +83,8 @@ const ICONS = {
   back: SVG_OPEN + '<path d="m15 18-6-6 6-6"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>',
   send: SVG_OPEN + '<path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+  expand: SVG_OPEN + '<path d="M14 4h6v6M20 4l-6 6M10 20H4v-6M4 20l6-6"/></svg>',
+  chevDown: SVG_OPEN + '<path d="m6 9 6 6 6-6"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
   folder: SVG_OPEN + '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>',
   warn: SVG_OPEN + '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.2" r=".5" fill="currentColor"/></svg>',
@@ -3167,6 +3169,7 @@ function renderReadonlyComposer(s) {
   const box = $('#ro-composer')
   if (!box) return
   const ro = subagentReadonly(s)
+  if (ro && composerIsExpanded()) closeComposerExpand({ animate: false, focus: 'none' })
   const composer = document.querySelector('#view-chat .composer')
   box.style.display = ro ? '' : 'none'
   if (composer) composer.style.display = ro ? 'none' : ''
@@ -4446,6 +4449,7 @@ async function openSession(id, force) {
   renderChat(s, true)
   refreshChatChrome(s)
   restoreDraft(id)
+  syncComposerCount()
   syncSendButton(s)   // 草稿可能是刚恢复的：有字就恢复发送键
   loadFb(s)   // 消息评价表（👍/👎）：打开会话时拉一次，静默失败
 }
@@ -4471,6 +4475,77 @@ function syncSendButton(s) {
   const cur = s || (S.current ? sess(S.current) : null)
   const emptyWhileRunning = !!(cur && cur.running) && !composerHasContent()
   send.disabled = S.connState !== 'online' || !!subagentReadonly(cur) || emptyWhileRunning
+}
+/* ---- 输入区展开：同一 composer 在近全屏抽屉与底部一行之间切换 ---- */
+let composerExpandClosing = false
+let composerExpandTimer = 0
+let composerExpandToken = 0
+
+function composerIsExpanded() {
+  const wrap = $('#composer-wrap')
+  return !!(wrap && wrap.classList.contains('expanded'))
+}
+function syncComposerCount() {
+  const input = $('#chat-input')
+  const count = $('#composer-count')
+  if (!input || !count) return
+  count.textContent = (input.textContent || '').replace(/\s/g, '').length + ' 字'
+}
+function openComposerExpand() {
+  const wrap = $('#composer-wrap')
+  const scrim = $('#composer-scrim')
+  const btn = $('#expand-btn')
+  const input = $('#chat-input')
+  if (!wrap || !scrim || !btn) return
+  if (composerExpandClosing) {
+    clearTimeout(composerExpandTimer)
+    composerExpandClosing = false
+    composerExpandToken++
+  } else if (composerIsExpanded()) return
+  const s = S.current ? sess(S.current) : null
+  if (!s || subagentReadonly(s)) return
+  syncComposerCount()
+  wrap.classList.add('expanded')
+  scrim.classList.add('show')
+  btn.setAttribute('aria-expanded', 'true')
+  void wrap.offsetHeight
+  requestAnimationFrame(() => {
+    if (!composerIsExpanded() || composerExpandClosing) return
+    wrap.classList.add('in')
+    // 保留输入焦点：想继续写长草稿时，键盘不应因为点展开键而收起。
+    setTimeout(() => {
+      if (!composerIsExpanded() || composerExpandClosing) return
+      try { input.focus({ preventScroll: true }) } catch (e) {}
+    }, 80)
+  })
+  vibrate(6)
+}
+function closeComposerExpand(opts) {
+  opts = opts || {}
+  const wrap = $('#composer-wrap')
+  const scrim = $('#composer-scrim')
+  const btn = $('#expand-btn')
+  const input = $('#chat-input')
+  if (!wrap || composerExpandClosing || !composerIsExpanded()) return false
+  composerExpandClosing = true
+  const token = ++composerExpandToken
+  clearTimeout(composerExpandTimer)
+  scrim.classList.remove('show')
+  wrap.classList.remove('in')
+  const finish = () => {
+    if (token !== composerExpandToken) return
+    wrap.classList.remove('expanded')
+    if (btn) btn.setAttribute('aria-expanded', 'false')
+    composerExpandClosing = false
+    if (opts.focus === 'input') {
+      try { input.focus({ preventScroll: true }) } catch (e) {}
+    } else if (opts.focus !== 'none' && btn) {
+      try { btn.focus({ preventScroll: true }) } catch (e) {}
+    }
+  }
+  if (opts.animate === false) finish()
+  else composerExpandTimer = setTimeout(finish, 360)
+  return true
 }
 function refreshChatChrome(s) {
   renderGoalBanner(s)   // 目标横幅：进会话与状态刷新时同步
@@ -5639,6 +5714,7 @@ function closeProto() { if (protoView) { protoView.remove(); protoView = null } 
 
 function route() {
   const h = location.hash || '#/'
+  closeComposerExpand({ animate: false, focus: 'none' })
   ttsStop()   // 切走就别念了
   voiceStopAll()   // 语音模式同理：切走停播报/停录音
   // 离开会话：把「看到现在」记为已读（覆盖观看期间静默折叠进来的事件；正在运行的轮由 turn/end 实时记）
@@ -5657,7 +5733,7 @@ function initSwipeBack() {
   const v = chatView()
   let maybe = false, tracking = false, sx = 0, sy = 0, dx = 0
   v.addEventListener('touchstart', (e) => {
-    if (!S.current) return
+    if (!S.current || composerIsExpanded()) return
     if (e.touches[0].clientX <= 24) { maybe = true; tracking = false; sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0 }
   }, { passive: true })
   v.addEventListener('touchmove', (e) => {
@@ -7327,7 +7403,15 @@ function buildShell() {
       <div class="qd-list" id="qd-list"></div>
       <div class="qd-foot" id="qd-foot"></div>
     </div>
-    <div class="composer-wrap">
+    <div class="composer-scrim" id="composer-scrim" aria-hidden="true"></div>
+    <div class="composer-wrap" id="composer-wrap">
+      <div class="composer-head" id="composer-head">
+        <button class="composer-collapse" id="composer-collapse" type="button" aria-label="收起输入框" aria-controls="composer-wrap">
+          <span class="ic-slot" data-ic="chevDown"></span><span>收起</span>
+        </button>
+        <span class="composer-head-title">编辑消息</span>
+        <span class="composer-count" id="composer-count"></span>
+      </div>
       <div class="tts-bar" id="tts-bar"></div>
       <div class="stale-strip" id="stale-strip" style="display:none"></div>
       <div class="stale-strip off" id="offline-strip" style="display:none"></div>
@@ -7339,6 +7423,7 @@ function buildShell() {
         <button class="c-btn" id="attach-btn" aria-label="添加图片"><span class="ic-slot" data-ic="plus"></span></button>
         <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple style="display:none">
         <div class="input-box" id="chat-input" contenteditable data-ph="发消息…" aria-label="消息输入框"></div>
+        <button class="exp-btn" id="expand-btn" type="button" aria-label="展开输入框" aria-expanded="false" aria-controls="composer-wrap"><span class="ic-slot" data-ic="expand"></span></button>
         <button class="send" id="send-btn" aria-label="发送"><span class="ic-slot" data-ic="send"></span></button>
       </div>
     </div>
@@ -7760,6 +7845,9 @@ function buildShell() {
     await addImageFiles(files)
   })
   const input = $('#chat-input')
+  onTap($('#expand-btn'), () => openComposerExpand())
+  onTap($('#composer-collapse'), () => closeComposerExpand())
+  onTap($('#composer-scrim'), () => { if (composerIsExpanded()) closeComposerExpand() })
   // 发送后的“回声”抑制：iOS 中文输入法在 composition 提交时可能把刚发出的文字重新写回
   // contenteditable（textContent='' 下仍会被提交覆盖）。记住刚发出的原文，短窗内再出现
   // 同样的字符串就视为回声，再清一次；用户开始输入下一条（文本不同）则立即放行。
@@ -7769,6 +7857,7 @@ function buildShell() {
     input.innerHTML = ''
     if (input.textContent) input.textContent = ''
     if (S.current) clearDraft(S.current)
+    syncComposerCount()
     return true
   }
   // 粘贴：优先剪贴板图片（截图直接粘贴），否则只粘贴纯文本避免富文本污染
@@ -7782,6 +7871,7 @@ function buildShell() {
   })
   // 输入草稿：按会话持久化
   input.addEventListener('input', () => {
+    syncComposerCount()
     syncSendButton()   // 运行中：一有内容发送键就恢复（排队 / 插话），清空又回到禁用态
     if (!S.current) return
     const t = input.textContent
@@ -7821,6 +7911,7 @@ function buildShell() {
     input.innerHTML = ''
     input.textContent = ''
     clearDraft(S.current)
+    syncComposerCount()
     syncSendButton()   // 发出即清空：运行中按钮回到禁用态
     const wipeEcho = () => { if (isSentEcho(input.textContent)) return }
     requestAnimationFrame(wipeEcho)
@@ -7828,6 +7919,7 @@ function buildShell() {
     setTimeout(wipeEcho, 120)
     vibrate(8)
     sendPrompt(S.current, text, images, forceMode)  // 乐观上屏，失败在气泡上重试
+    if (composerIsExpanded()) closeComposerExpand({ focus: 'input' })
   }
   // 发送：短按在 touchend 就执行（键盘收起引起的按钮位移会让合成 click 被丢弃＝第一次点白点），
   // 长按（420ms）= 本次反向（默认排队 → 长按插话；反之亦然）。鼠标/键盘仍走 click。
@@ -8102,6 +8194,7 @@ function syncVoiceSurface(s) {
   const ro = subagentReadonly(s)
   const m = modeOf(s.id)
   const voiceOn = m === 'voice' && !ro
+  if (voiceOn && composerIsExpanded()) closeComposerExpand({ animate: false, focus: 'none' })
   v.style.display = voiceOn ? 'flex' : 'none'
   const comp = $('#view-chat .composer-wrap')
   if (comp) comp.style.visibility = voiceOn ? 'hidden' : ''
@@ -8882,6 +8975,10 @@ document.addEventListener('keydown', (e) => {
   if (!top) return
   const fn = OV_CLOSERS[top]
   if (fn) { e.preventDefault(); fn() }
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented) return
+  if (closeComposerExpand()) e.preventDefault()
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
