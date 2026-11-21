@@ -976,15 +976,16 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .goal-edit { display:block; width:calc(100% - 32px); margin:4px 16px 8px; min-height:88px; border-radius:12px; border:1px solid var(--accent); background:var(--bg-card); color:var(--text); font-size:14px; line-height:1.6; padding:10px 12px; outline:none; resize:vertical; }
 /* 朗读播报条（输入框上方，与排队条同区）：单行 · 状态词 · 播放暂停合一 + 语速 + 停止；
    播完停驻「播报完成」，▶ 即重听（稿走缓存秒起播） */
-.tts-bar { display:none; align-items:center; gap:10px; margin:0 12px 6px; padding:8px 12px; background:var(--bg-elev); border:1px solid var(--line); border-radius:13px; transition:border-color .2s, background .2s; }
+/* 听回复时整个条要显眼、好按：44px 触控目标 + 更大的声波与状态字 */
+.tts-bar { display:none; align-items:center; gap:10px; margin:0 10px 8px; padding:10px 10px 10px 14px; background:var(--bg-elev); border:1px solid var(--line); border-radius:18px; min-height:58px; transition:border-color .2s, background .2s; }
 .tts-bar.show { display:flex; }
-.tts-bar .tts-pp, .tts-bar .tts-x { background:none; border:none; color:var(--text-2); width:30px; height:30px; flex:none; display:flex; align-items:center; justify-content:center; padding:0; border-radius:8px; }
-.tts-bar .tts-pp svg, .tts-bar .tts-x svg { width:16px; height:16px; display:block; }
+.tts-bar .tts-pp, .tts-bar .tts-x { background:none; border:none; color:var(--text-2); width:44px; height:44px; flex:none; display:flex; align-items:center; justify-content:center; padding:0; border-radius:13px; }
+.tts-bar .tts-pp svg, .tts-bar .tts-x svg { width:22px; height:22px; display:block; }
 .tts-bar .tts-pp { color:var(--accent); }   /* 主操作用强调色图标，不用实心圆底 */
 .tts-bar .tts-pp:active, .tts-bar .tts-x:active { background:var(--bg-card-2); }
 /* 声波：播放跳动 / 暂停收短 / 整理稿慢脉动 / 播完静止 */
-.tts-wave { flex:none; display:flex; align-items:center; gap:2.5px; width:22px; height:18px; justify-content:center; }
-.tts-wave i { width:3px; height:4px; border-radius:2px; background:var(--text-3); transition:height .2s; }
+.tts-wave { flex:none; display:flex; align-items:center; gap:3px; width:30px; height:26px; justify-content:center; }
+.tts-wave i { width:3.5px; height:5px; border-radius:2px; background:var(--text-3); transition:height .2s; }
 .tts-wave[data-mode="playing"] i { background:var(--accent); animation:ttsWave .9s ease-in-out infinite; }
 .tts-wave[data-mode="playing"] i:nth-child(2) { animation-delay:.15s; }
 .tts-wave[data-mode="playing"] i:nth-child(3) { animation-delay:.3s; }
@@ -995,11 +996,12 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .tts-wave[data-mode="prep"] i:nth-child(3) { animation-delay:.4s; }
 .tts-wave[data-mode="prep"] i:nth-child(4) { animation-delay:.6s; }
 .tts-wave[data-mode="prep"] i:nth-child(5) { animation-delay:.8s; }
-.tts-wave[data-mode="paused"] i { height:5px; }
-@keyframes ttsWave { 0%,100% { height:4px; } 50% { height:15px; } }
+.tts-wave[data-mode="paused"] i { height:6px; }
+@keyframes ttsWave { 0%,100% { height:5px; } 50% { height:22px; } }
 .tts-bar .tts-pp:disabled { opacity:.5; }
-.tts-bar .tts-info { flex:1; min-width:0; font-size:12.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:9px; font-size:12px; padding:4px 9px; flex:none; font-variant-numeric:tabular-nums; }
+.tts-bar .tts-info { flex:1; min-width:0; font-size:15px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:.01em; }
+.tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:13px; font-size:14px; font-weight:600; min-height:40px; padding:0 14px; flex:none; font-variant-numeric:tabular-nums; }
+.tts-bar .tts-rate:active { background:var(--bg-card-2); }
 .tts-bar.prep .tts-info { color:var(--text-3); }
 .tts-bar.done { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--bg-elev)); }
 .tts-bar.done .tts-info { color:var(--text); }

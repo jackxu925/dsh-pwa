@@ -4827,8 +4827,28 @@ function setRate(r) {
   TTS.rate = r
   try { localStorage.setItem('dshm-tts-rate', String(r)) } catch (e) {}
   const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtRate(r)   // 语音甲板与朗读浮条共用一档语速
-  // 云端播放中：<audio> 元素直接改速（保调）；WebAudio 段等下段生效；系统引擎下句生效
-  if (VOICE.state === 'speaking' && VOICE.segMode === 'el' && VOICE.el) { try { VOICE.el.playbackRate = r } catch (e) {} }
+  if (VOICE.state === 'speaking') {
+    if (VOICE.engine === 'system') {
+      // 系统语音：每句一个 utterance，下一句自动用新速率（不打断当前句）
+    } else if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
+      try { VOICE.el.playbackRate = r } catch (e) {}   // 元素播放：立即改速、保调
+    } else if (VOICE.curSeg) {
+      // WebAudio 不支持变速（原实现要等下段才生效 = "点了没反应"）：点语速本身是手势，
+      // 现在就解锁元素，从当前位置切到元素续播——即刻变速，音色和进度都不丢。
+      const pos = VOICE.segMode === 'wa' ? vWaElapsed() : (VOICE.pausedOffset || 0)
+      vArmAudio()
+      if (VOICE.elReady) {
+        vWaStop()   // 旧段以 'stopped' 收尾：vRunSeg 不会把它当失败
+        VOICE.segMode = 'el'
+        vElPlay(VOICE.curSeg, pos).then((ok) => {
+          if (ok !== true) return
+          if (VOICE.lastSpokenKey && VOICE.state === 'speaking') { VOICE.pi++; vSyncDeck(); vPlayNext(VOICE.lastSpokenKey) }
+        })
+      } else {
+        vRunSeg(VOICE.lastSpokenKey, 0)   // 解不了锁：至少从段首用新速率重念
+      }
+    }
+  }
   barRender()
 }
 function ttsCycleRate() {
@@ -8679,20 +8699,9 @@ function voiceBind() {
   const rt = $('#v-rate')
   const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtRate(TTS.rate)   // 语速是全局的：进语音模式先对齐显示
   if (rt) rt.onclick = () => {
-    ttsCycleRate()   // 内部 setRate：落盘 + 甲板显示 + 元素播放中直接改速
+    ttsCycleRate()   // setRate 统一处理：落盘、甲板/浮条显示、播报中即时变速
     if (rv) rv.textContent = fmtRate(TTS.rate)
     vUnlockEl()
-    if (VOICE.state === 'speaking') {
-      if (VOICE.segMode === 'wa' && TTS.rate !== 1 && VOICE.elReady && VOICE.curSeg) {
-        // 正段从 WebAudio 切到元素播放，保持音色、从当前位置续播
-        const pos = vWaElapsed()
-        VOICE.segMode = 'el'
-        vElPlay(VOICE.curSeg, pos).then((ok) => {
-          if (!ok) return
-          if (VOICE.lastSpokenKey && VOICE.state === 'speaking') { VOICE.pi++; vSyncDeck(); vPlayNext(VOICE.lastSpokenKey) }
-        })
-      }
-    }
   }
   setInterval(() => {
     const t = $('#v-rec-time')
