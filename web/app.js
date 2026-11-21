@@ -884,14 +884,17 @@ function foldEvent(s, event, view, opts) {
     case 'turn/end': {
       s.running = false
       if (S.current === s.id) seenMark(s.id, event.seq)   // 正看着：这轮的回复不用再标未读
-      // 自动朗读：语音模式优先（对讲机全链路：改写→云端合成/系统降级），普通自动朗读其次。
-      // 只在实时 turn/end 上播：重连快照里的历史 turn/end 不能把旧回复再播一遍。
-      if (!historical && voiceMode(s.id) && s.loaded && S.current === s.id) {
-        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
-        if (lastA) voiceScheduleSpeak(s, lastA)
-      } else if (!historical && ttsAuto() && s.loaded && S.current === s.id) {
-        const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
-        if (lastA) setTimeout(() => { if (S.current === s.id) ttsSpeak(s, lastA) }, 500)
+      // 自动朗读（三态版）：语音=对讲全链路；朗读=同一管线的浮条表面。只播实时轮——
+      // 重连快照里的历史 turn/end 不能把旧回复再播一遍（main 的 historical 守卫）。
+      if (!historical) {
+        const endMode = modeOf(s.id)
+        if (endMode === 'voice' && s.loaded && S.current === s.id) {
+          const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+          if (lastA) voiceScheduleSpeak(s, lastA)
+        } else if (endMode === 'read' && s.loaded && S.current === s.id) {
+          const lastA = [...s.items].reverse().find((i) => i.kind === 'assistant' && i.text && i.text.trim())
+          if (lastA) setTimeout(() => { if (S.current === s.id && modeOf(s.id) === 'read') readSpeak(s, lastA) }, 500)
+        }
       }
       // 轮级统计：turn/start→turn/end 的时长 + 本轮各步 usage 汇总（事件驱动累计，纯思考/工具步不渲染但也要算）
       const durMs = s._turnStartAt ? Math.max(0, event.time - s._turnStartAt) : 0
@@ -4514,10 +4517,11 @@ function refreshChatChrome(s) {
   renderLineage(s)
   renderReadonlyComposer(s)
   syncVoiceSurface(s)   // 语音模式表层的显隐跟随会话开关与只读态
-  // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向）
+  // 输入框 placeholder 明示发送模式（运行中按设置排队/插话；长按发送反向；朗读模式注明会念出来）
   const input2 = $('#chat-input')
   if (input2 && !off) {
-    input2.dataset.ph = subagentReadonly(s) ? '只读会话' : s.running ? (busyEnter() === 'steer' ? '插话发送…（长按排队）' : '将排队发送…（长按插话）') : '发消息…'
+    const idlePh = modeOf(s.id) === 'read' ? '发消息…（回答会念给你听）' : '发消息…'
+    input2.dataset.ph = subagentReadonly(s) ? '只读会话' : s.running ? (busyEnter() === 'steer' ? '插话发送…（长按排队）' : '将排队发送…（长按插话）') : idlePh
   }
 }
 /* ---- 上下文压力条（标题栏底边 2px） ---- */
@@ -4829,13 +4833,15 @@ function renderGoalPanel(s, editing) {
   body.appendChild(el('div', 'sheet-note', '目标由 agent 在长任务时创建：暂停后它跑完本轮即停，删除后不再自动继续。'))
 }
 
-/* ================= 朗读（TTS）：Web Speech API，本地免费、即点即播 =================
- * 交互（与用户确认过的方案）：助手消息 meta 行 🔊＝朗读该条；播放时输入框上方浮播报条
- *（⏸ · 第 i/N 段 · 语速 · ✕）；⋯ 里「自动朗读」开关（默认关，轮结束自动读最后一条）；
- * 发新消息/停止/切会话自动停；代码块跳过、markdown 转口语、按句排队（绕开 iOS 长文截断）。 */
+/* ================= 朗读（TTS）管线 =================
+ * 交互定稿（2026-11-21 三态化）：顶栏胶囊＝「文字 | 朗读 | 语音」三选一。
+ * 朗读模式＝键盘输入 + 每轮结束自动播报；手动 🔊 任何模式都可播；语音模式＝对讲全链路。
+ * 播报内容不是原文：/api/pwa.tts-script 改写口语稿 → /api/pwa.tts 云端合成 → 无 key 降级
+ * Web Speech（本模块 ttsPrepare/ttsChunks 供降级与兜底用）。
+ * 浮播报条：单行 · 状态词（整理口语稿…/正在播报/已暂停/播报完成）·
+ * 播放暂停合一 + 语速 + 停止；播完停驻「播报完成」，点 ▶ 重听（稿走缓存秒起播）。
+ * 发新消息 / 停下 / 切会话自动停。 */
 const TTS = { on: false, paused: false, chunks: [], idx: 0, rate: (() => { try { return parseFloat(localStorage.getItem('dshm-tts-rate')) || 1 } catch (e) { return 1 } })(), voice: null, key: null, tok: 0 }
-function ttsAuto() { try { return localStorage.getItem('dshm-tts-auto') === '1' } catch (e) { return false } }
-function ttsSetAuto(v) { try { localStorage.setItem('dshm-tts-auto', v ? '1' : '0') } catch (e) {} }
 function ttsPickVoice() {
   if (!window.speechSynthesis) return
   const vs = speechSynthesis.getVoices() || []
@@ -4872,8 +4878,13 @@ function ttsChunks(x) {
 }
 function ttsToggle(s, item) {
   const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 20))
-  if (TTS.on && TTS.key === key) { ttsPauseResume(); return }
-  ttsSpeak(s, item)
+  // 手动 🔊 与自动朗读共用同一条自然管线（改写→云端→降级）；语音模式走对讲面板表面
+  if (VOICE._barHold && VOICE.lastSpokenKey === key) {
+    if (VOICE._barDone) { readReplay(); return }
+    if (VOICE.state === 'speaking') { vTogglePause(); return }
+  }
+  if (voiceMode(s.id)) voiceSpeak(s, item)
+  else readSpeak(s, item)
 }
 function ttsSpeak(s, item) {
   if (!window.speechSynthesis) { toast('此环境不支持语音朗读', true); return }
@@ -4914,35 +4925,110 @@ function ttsStop(silent) {
   if (window.speechSynthesis) speechSynthesis.cancel()
   ttsBar()
 }
+function fmtRate(r) { return (r % 1 ? String(r).replace(/0$/, '') : String(r)) + '×' }
+function setRate(r) {
+  if (![1, 1.25, 1.5, 2].includes(r)) return
+  TTS.rate = r
+  try { localStorage.setItem('dshm-tts-rate', String(r)) } catch (e) {}
+  const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtRate(r)   // 语音甲板与朗读浮条共用一档语速
+  if (VOICE.state === 'speaking') {
+    if (VOICE.engine === 'system') {
+      // 系统语音：每句一个 utterance，下一句自动用新速率（不打断当前句）
+    } else if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
+      try { VOICE.el.playbackRate = r } catch (e) {}   // 元素播放：立即改速、保调
+    } else if (VOICE.curSeg) {
+      // WebAudio 不支持变速（原实现要等下段才生效 = "点了没反应"）：点语速本身是手势，
+      // 现在就解锁元素，从当前位置切到元素续播——即刻变速，音色和进度都不丢。
+      const pos = VOICE.segMode === 'wa' ? vWaElapsed() : (VOICE.pausedOffset || 0)
+      vArmAudio()
+      if (VOICE.elReady) {
+        vWaStop()   // 旧段以 'stopped' 收尾：vRunSeg 不会把它当失败
+        VOICE.segMode = 'el'
+        vElPlay(VOICE.curSeg, pos).then((ok) => {
+          if (ok !== true) return
+          if (VOICE.lastSpokenKey && VOICE.state === 'speaking') { VOICE.pi++; vSyncDeck(); vPlayNext(VOICE.lastSpokenKey) }
+        })
+      } else {
+        vRunSeg(VOICE.lastSpokenKey, 0)   // 解不了锁：至少从段首用新速率重念
+      }
+    }
+  }
+  barRender()
+}
 function ttsCycleRate() {
   const rs = [1, 1.25, 1.5, 2]
-  TTS.rate = rs[(rs.indexOf(TTS.rate) + 1) % rs.length] || 1
-  try { localStorage.setItem('dshm-tts-rate', String(TTS.rate)) } catch (e) {}
   vibrate(6)
-  ttsBar()   // 只换档不打断：当前段照常播完，下一段起用新语速（重新起播会从段头复读，用户不要）
+  setRate(rs[(rs.indexOf(TTS.rate) + 1) % rs.length] || 1)   // 只换档不打断：当前段照常播完，下一段起用新语速
 }
-/* 播报条（输入框上方，与排队条同区） */
-function ttsBar() {
+/* ---- 浮播报条：单行 · 状态词 · 播放暂停合一 + 语速 + 停止；播完停驻可重听 ---- */
+function barPrepShow() {
+  VOICE._barHold = true; VOICE._barPrep = true; VOICE._barDone = false
+  barRender()
+}
+function barPlayShow() {
+  VOICE._barPrep = false
+  barRender()
+}
+function barDone() {
+  if (!VOICE._barHold) return
+  VOICE._barDone = true; VOICE._barPrep = false
+  barRender()
+  vWakeRelease()
+}
+function barStop() {
+  VOICE._barHold = false; VOICE._barPrep = false; VOICE._barDone = false
+  voiceStopAll()
+  toast('已停止朗读')
+}
+function readReplay() {
+  const s = sess(S.current)
+  if (!s || !VOICE.lastSpokenItem) return
+  readSpeak(s, VOICE.lastSpokenItem)   // 稿走 scriptCache：秒起播
+}
+/* 浮播报条图标（与原型一致：声波动画 + 播放暂停合一 + 语速 + 停止） */
+const BAR_SVG = {
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+}
+function barRender() {
   const bar = $('#tts-bar')
   if (!bar) return
-  if (!TTS.on) { bar.classList.remove('show'); bar.textContent = ''; return }
+  if (!VOICE._barHold) { bar.classList.remove('show'); bar.textContent = ''; return }
   bar.classList.add('show')
   bar.textContent = ''
-  const pp = el('button', 'tts-pp', TTS.paused ? '▶' : '⏸')
+  const paused = VOICE.userPaused || (VOICE.engine === 'system' && TTS.paused)
+  let label = paused ? '已暂停' : '正在播报'
+  let ppIcon = paused ? BAR_SVG.play : BAR_SVG.pause
+  let aria = paused ? '继续' : '暂停'
+  let fn = () => { vibrate(6); vTogglePause() }
+  if (VOICE._barPrep) { label = '整理口语稿…'; ppIcon = BAR_SVG.pause; aria = '整理口语稿中'; fn = null }
+  else if (VOICE._barDone) { label = '播报完成'; ppIcon = BAR_SVG.play; aria = '重听'; fn = () => { vibrate(8); readReplay() } }
+  bar.classList.toggle('done', !!VOICE._barDone)
+  bar.classList.toggle('prep', !!VOICE._barPrep)
+  // 声波：播放时跳动、暂停收短、整理稿时慢脉动、播完静止
+  const wave = el('span', 'tts-wave')
+  wave.dataset.mode = VOICE._barDone ? 'done' : VOICE._barPrep ? 'prep' : paused ? 'paused' : 'playing'
+  for (let i = 0; i < 5; i++) wave.appendChild(el('i'))
+  const pp = el('button', 'tts-pp')
   pp.type = 'button'
-  pp.setAttribute('aria-label', TTS.paused ? '继续' : '暂停')
-  pp.onclick = () => { vibrate(6); ttsPauseResume() }
-  const info = el('div', 'tts-info', (TTS.paused ? '已暂停' : '正在播报') + ' · ')
-  info.appendChild(el('b', null, (TTS.idx + 1) + '/' + TTS.chunks.length + ' 段'))
-  const rt = el('button', 'tts-rate', (TTS.rate % 1 ? String(TTS.rate).replace(/0$/, '') : String(TTS.rate)) + '×')
-  rt.type = 'button'
-  rt.onclick = ttsCycleRate
-  const x = el('button', 'tts-x', '✕')
+  pp.setAttribute('aria-label', aria)
+  pp.innerHTML = ppIcon
+  if (fn) pp.onclick = fn
+  else pp.disabled = true
+  const x = el('button', 'tts-x')
   x.type = 'button'
   x.setAttribute('aria-label', '停止朗读')
-  x.onclick = () => { vibrate(6); ttsStop() }
-  bar.append(pp, info, rt, x)
+  x.innerHTML = BAR_SVG.stop
+  x.onclick = () => { vibrate(6); barStop() }
+  const rt = el('button', 'tts-rate', fmtRate(TTS.rate))
+  rt.type = 'button'
+  rt.setAttribute('aria-label', '语速')
+  rt.onclick = ttsCycleRate
+  bar.append(wave, el('div', 'tts-info', label), pp, rt, x)
 }
+/* 系统引擎播报条与自然管线共用同一个渲染器（ttsSpeak 系调用点保留原函数名） */
+function ttsBar() { barRender() }
 /* iOS：首次朗读必须在用户手势里发生——开自动朗读时用一条空播报热身 */
 function ttsWarm() {
   if (!window.speechSynthesis) return
@@ -5928,6 +6014,7 @@ async function sendPrompt(id, text, images, forceMode, reuseRpcId) {
   prevDirtyMark(id)   // 预览现在停在提问文本上；回答落地（follow 折叠或后台补拉）后清除
   s.follow = true  // 自己发消息：必然想看到最新
   ttsStop()   // 开口说话比听更重要：发消息即停朗读
+  if (VOICE.surface === 'bar') voiceStopAll()   // 朗读模式/手动🔊 的浮条播报：发新消息即停（语音对讲表面不在此列，它自己管发送）
   if (S.current === id) renderChat(s, true)
   renderListSoon()
   const content = []
@@ -6260,26 +6347,13 @@ function renderSheet(s) {
     menuRow(talk, { icon: 'lock', name: '权限', value: permName(), onClick: () => openPermPanel(s) })
   }
   menuRow(talk, { icon: 'bolt', name: '运行中发送', value: busyEnter() === 'queue' ? '排队' : '插话', onClick: () => openSendPanel(s) })
-  {
-    const sw = el('span', 'tg-sw' + (ttsAuto() ? ' on' : ''))
-    sw.setAttribute('role', 'switch')
-    sw.setAttribute('aria-checked', ttsAuto() ? 'true' : 'false')
-    const r = activate(btnize(el('div', 'ms-row')), () => {
-      vibrate(8)
-      const nv = !ttsAuto()
-      ttsSetAuto(nv)
-      sw.classList.toggle('on', nv)
-      sw.setAttribute('aria-checked', nv ? 'true' : 'false')
-      if (nv) { ttsWarm(); toast('已开启：回答完成后自动朗读') } else { ttsStop(); toast('已关闭自动朗读') }
-    })
-    const ic = el('span', 'ms-row-ic')
-    ic.appendChild(icon('speaker', 17))
-    const mid = el('div', 'ms-row-mid')
-    mid.appendChild(el('div', 'ms-row-name', '自动朗读回答'))
-    mid.appendChild(el('div', 'ms-row-desc', '每轮回答结束后自动语音播报（代码块跳过）'))
-    r.append(ic, mid, sw)
-    talk.appendChild(r)
-  }
+  // 朗读三项：模式切换在顶栏胶囊（文字/朗读/语音），菜单里只留「听什么、听多快」的补充
+  menuRow(talk, {
+    icon: 'file', name: '查看朗读稿', desc: '屏幕原文 vs 实际播报的口语稿',
+    value: VOICE.lastScriptItem ? '' : '还没播过',
+    onClick: () => { closeSheet(); openScriptSheet(s) },
+  })
+  menuRow(talk, { icon: 'speaker', name: '语速', value: fmtRate(TTS.rate), onClick: () => openRatePanel(s) })
 
   // ---- 内容：任务清单（有才出现）/ 工作区文件 / 统计 / 复制全部对话 ----
   const data = group('内容')
@@ -7219,10 +7293,9 @@ function buildShell() {
     <div class="navbar"><div class="bar">
       <button class="nav-btn back" id="chat-back" aria-label="返回"><span class="ic-slot" data-ic="back"></span></button>
       <div class="title"><span id="chat-title"></span><div class="subtitle" id="chat-sub"></div></div>
-      <div class="vm-seg" id="vm-seg" role="tablist" aria-label="输入模式：文字或语音">
-        <button type="button" id="vm-text" role="tab" aria-selected="true">文字</button>
-        <button type="button" id="vm-voice" role="tab" aria-selected="false">语音</button>
-      </div>
+      <button class="vm-btn" id="vm-btn" type="button" aria-label="交互模式（文字/朗读/语音）" aria-haspopup="dialog">
+        <span class="vm-ic" id="vm-ico"></span><span id="vm-name">文字</span>
+      </button>
       <button class="nav-btn" id="chat-more" aria-label="会话设置"><span class="ic-slot" data-ic="more"></span></button>
       <div class="ctx-bar" aria-hidden="true"><div class="ctx-fill" id="ctx-fill"></div></div>
     </div></div>
@@ -7351,6 +7424,26 @@ function buildShell() {
         <button class="think-close" id="think-close" type="button" aria-label="关闭">✕</button>
       </div>
       <div class="think-body" id="think-body"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="mode-ov" aria-hidden="true">
+    <div class="sheet mode-sheet" role="dialog" aria-label="交互模式">
+      <div class="grabber"></div>
+      <div class="ms-head">
+        <span class="ms-head-title">交互模式</span>
+        <button class="ms-head-x" id="mode-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="sheet-scroll" id="mode-list"></div>
+    </div>
+  </div>
+  <div class="sheet-overlay" id="script-ov" aria-hidden="true">
+    <div class="sheet script-sheet" role="dialog" aria-label="朗读稿对照">
+      <div class="grabber"></div>
+      <div class="ms-head">
+        <span class="ms-head-title">朗读稿对照</span>
+        <button class="ms-head-x" id="script-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="sheet-scroll" id="script-body"></div>
     </div>
   </div>
   <div class="sheet-overlay" id="task-ov" aria-hidden="true">
@@ -7874,18 +7967,40 @@ const VOICE = {
   el: null, elReady: false, elActive: false, elResolve: null, curSeg: null, segMode: null,
   paras: [], pi: 0, engine: 'cloud', fetchingPara: -1,
   lastSpokenKey: null, lastSpokenItem: null,
+  lastScript: null, lastScriptItem: null, lastScriptKey: null,   // 「查看朗读稿」：最近一次播报的原文/口语稿
   scriptCache: new Map(), pref: null,   // pref：全文应答的并行 TTS 预取（播放零缝隙）
   retryBlob: null, autoStopping: false,   // 识别失败保留音频 + 2 分钟上限
   asrAbort: null, sendTok: 0, sysPoll: null,   // 识别可取消 + 防双发 + 系统引擎完成轮询
+  surface: 'voice', _barHold: false, _barPrep: false, _barDone: false,   // surface：'voice'=对讲面板 / 'bar'=浮播报条（朗读模式与手动🔊共用）
   speakTimer: null, speakGen: 0,   // turn/end 的「稍后播报」可取消排期（gen 挡住旧定时器）
 }
-function voiceModes() { try { return JSON.parse(localStorage.getItem('dshm-voice-mode') || '{}') } catch (e) { return {} } }
-function voiceMode(id) { return !!voiceModes()[id] }
-function voiceSetMode(id, on) {
-  const m = voiceModes()
-  if (on) m[id] = 1; else delete m[id]
-  try { localStorage.setItem('dshm-voice-mode', JSON.stringify(m)) } catch (e) {}
+/* ---- 交互模式：文字 | 朗读 | 语音（按会话存储，2026-11-21 三态化） ----
+ * 旧两个开关收敛进一个模式位：全局「自动朗读回答」(dshm-tts-auto) 与按会话
+ * 「语音模式」(dshm-voice-mode) → dshm-iamode（按会话）。读取时懒迁移：
+ * 旧语音开关 → voice；旧自动朗读 → read；都没有 → text。
+ * 朗读 = 只开播报（改写口语稿→云端合成→系统降级），输入仍是键盘；
+ * 语音 = 按住说话的对讲全链路。 */
+function modeMap() { try { return JSON.parse(localStorage.getItem('dshm-iamode') || '{}') } catch (e) { return {} } }
+function modeOf(id) {
+  const m = modeMap()
+  if (id && m[id]) return m[id]
+  // 旧键只读不写：显式选择（dshm-iamode 命中）永远优先；否则按旧语义回退
+  if (id) {
+    try {
+      const legacy = JSON.parse(localStorage.getItem('dshm-voice-mode') || '{}')
+      if (legacy[id]) return 'voice'
+    } catch (e) {}
+  }
+  try { if (localStorage.getItem('dshm-tts-auto') === '1') return 'read' } catch (e) {}
+  return 'text'
 }
+function modeSet(id, mode) {
+  const m = modeMap()
+  m[id] = mode
+  try { localStorage.setItem('dshm-iamode', JSON.stringify(m)) } catch (e) {}
+}
+function voiceMode(id) { return modeOf(id) === 'voice' }
+function voiceSetMode(id, on) { modeSet(id, on ? 'voice' : 'text') }
 function micAvailable() {
   if (VOICE.micOK !== null) return VOICE.micOK
   VOICE.micOK = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)
@@ -7929,7 +8044,16 @@ const vDone = () => vCue(() => { vTone(880, 0, .09, .13); vTone(587, .11, .13, .
 const vDiscard = () => vCue(() => vTone(420, 0, .09, .14, 'triangle'))
 const vPauseCue = () => vCue(() => vTone(560, 0, .05, .11))
 const vResumeCue = () => vCue(() => vTone(740, 0, .05, .11))
-document.addEventListener('click', vUnlock, { passive: true })
+/* iOS 音频解锁：朗读模式是「自动播报」——播报开始那一刻没有用户手势，只能靠此前
+ * 任意一次点击/触摸把两个引擎备好（WebAudio context + <audio> 元素）。重启 PWA 后
+ * 模式从 localStorage 恢复，选模式那一拍的手势早没了；不解锁就会静默卡在"正在播报"。 */
+let vWarmed = false
+function vArmAudio() {
+  vUnlock(); vUnlockEl()
+  if (!vWarmed) { vWarmed = true; try { ttsWarm() } catch (e) {} }
+}
+document.addEventListener('click', vArmAudio, { passive: true })
+document.addEventListener('pointerdown', vArmAudio, { passive: true })
 /* ---- 状态渲染 ---- */
 const V_WORDS = { idle: '就绪', recording: '在听', asr: '识别中…', thinking: '发送中…', speaking: '正在播报' }
 function vFlash(t, shake) {
@@ -7961,6 +8085,7 @@ function vSetState(st) {
   if (we && we.textContent !== w) { we.textContent = w; we.classList.remove('v-swap'); void we.offsetWidth; we.classList.add('v-swap') }
   $('#v-hint').textContent = h
   vSyncDeck()
+  barRender()   // 两表面同源：状态一变，浮播报条同步（朗读模式没有面板，只有它）
 }
 function vSyncDeck() {
   const speaking = VOICE.state === 'speaking'
@@ -7975,20 +8100,32 @@ function syncVoiceSurface(s) {
   const v = $('#voice-view')
   if (!v) return
   const ro = subagentReadonly(s)
-  const on = voiceMode(s.id) && !ro
-  v.style.display = on ? 'flex' : 'none'
+  const m = modeOf(s.id)
+  const voiceOn = m === 'voice' && !ro
+  v.style.display = voiceOn ? 'flex' : 'none'
   const comp = $('#view-chat .composer-wrap')
-  if (comp) comp.style.visibility = on ? 'hidden' : ''
-  // 顶栏模式切换：文字|语音 是并列关系（真机反馈：藏在 ⋯ 里的开关不像'模式'）
-  const seg = $('#vm-seg')
-  if (seg) {
-    seg.style.display = ro ? 'none' : ''
-    const vt = $('#vm-text'), vv = $('#vm-voice')
-    if (vt) { vt.classList.toggle('on', !on); vt.setAttribute('aria-selected', String(!on)) }
-    if (vv) { vv.classList.toggle('on', !!on); vv.setAttribute('aria-selected', String(on)) }
+  if (comp) comp.style.visibility = voiceOn ? 'hidden' : ''
+  // 顶栏模式胶囊：图标 + 当前模式名，点开三选面板（平时不铺开、不抢注意力）
+  const btn = $('#vm-btn')
+  if (btn) {
+    btn.style.display = ro ? 'none' : ''
+    syncModeBtn(m)
   }
-  if (!on && VOICE.state !== 'idle') voiceStopAll()
-  if (on) { vSetState(VOICE.state === 'idle' ? 'idle' : VOICE.state); voiceWakeLock() }
+  // 声明式只负责显隐；语音表面有活才兜底收尾，别碰朗读模式的浮条播报
+  if (!voiceOn && VOICE.surface === 'voice' && VOICE.state !== 'idle') voiceStopAll()
+  if (voiceOn) { vSetState(VOICE.state === 'idle' ? 'idle' : VOICE.state); voiceWakeLock() }
+}
+const MODE_META = {
+  text: { name: '文字', icon: 'chat', desc: '只看文字回复，最安静' },
+  read: { name: '朗读', icon: 'speaker', desc: '你打字，AI 把回答念给你听' },
+  voice: { name: '语音', icon: 'mic', desc: '按住说话，对讲模式' },
+}
+function syncModeBtn(m) {
+  const meta = MODE_META[m] || MODE_META.text
+  const ico = $('#vm-ico')
+  if (ico) { ico.textContent = ''; ico.appendChild(icon(meta.icon, 15)) }
+  const nm = $('#vm-name')
+  if (nm) nm.textContent = meta.name
 }
 function voiceStopAll() {
   VOICE.tok++
@@ -8000,11 +8137,24 @@ function voiceStopAll() {
   VOICE.paras = []; VOICE.pi = 0; VOICE.wasSpeaking = false; VOICE.prevWorking = null
   VOICE.cancelPending = false
   VOICE.pref = null; VOICE.retryBlob = null
+  VOICE._barHold = false; VOICE._barPrep = false; VOICE._barDone = false
   vRecCleanup()   // 停采集、释放麦克风
   clearInterval(VOICE.sysPoll)
   vAudioStop()
   ttsStop(true)
   vSetState('idle')
+  vWakeRelease()
+}
+/* 只收麦克风侧（录音/识别），不碰正在进行的播报：语音→朗读转场用 */
+function vStopCapture() {
+  VOICE.sendTok++
+  clearTimeout(VOICE.timer)
+  try { if (VOICE.asrAbort) VOICE.asrAbort.abort() } catch (e) {}
+  VOICE.asrAbort = null
+  VOICE.cancelPending = false
+  VOICE.retryBlob = null
+  vRecCleanup()
+  if (VOICE.state === 'recording' || VOICE.state === 'asr') vSetState('idle')
 }
 function vAudioStop() {
   vWaStop()
@@ -8018,10 +8168,17 @@ function vAudioStop() {
 let vWakeLock = null
 async function voiceWakeLock() {
   try {
-    if ('wakeLock' in navigator && !vWakeLock && voiceMode(S.current || '')) vWakeLock = await navigator.wakeLock.request('screen')
+    const keep = voiceMode(S.current || '') || (VOICE.surface === 'bar' && VOICE.state === 'speaking')
+    if ('wakeLock' in navigator && !vWakeLock && keep) vWakeLock = await navigator.wakeLock.request('screen')
   } catch (e) { vWakeLock = null }
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) voiceWakeLock() })
+function vWakeRelease() {
+  if (!vWakeLock) return
+  if (voiceMode(S.current || '')) return   // 语音模式仍常开屏幕
+  try { vWakeLock.release() } catch (e) {}
+  vWakeLock = null
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { voiceWakeLock(); vArmAudio() } })
 /* ---- 按压手势：录音 / 上滑取消 / 轻点暂停 / 打断 ---- */
 function vOnDown(e) {
   if (VOICE.state === 'recording') return
@@ -8246,7 +8403,11 @@ function vRecCleanup() {
   try { if (VOICE.recStream) VOICE.recStream.getTracks().forEach((t) => t.stop()) } catch (e) {}
   VOICE.recProc = null; VOICE.recSource = null; VOICE.recMute = null; VOICE.recStream = null; VOICE.pcm = []
 }
-/* ---- 播报：改写 → 分段 → 云端 TTS（audio 元件，锁屏可续）→ 降级 Web Speech ---- */
+/* ---- 播报：改写 → 分段 → 云端 TTS（audio 元件，锁屏可续）→ 降级 Web Speech ----
+ * 单一状态机两个表面（VOICE.surface）：'voice' 驱动对讲面板；'bar' 驱动输入框上方
+ * 浮播报条（朗读模式的自动播报 + 任何模式的手动 🔊）。管线本体只有一份。 */
+async function voiceSpeak(s, item) { return speakPipeline(s, item, 'voice') }
+async function readSpeak(s, item) { return speakPipeline(s, item, 'bar') }
 /* turn/end 后延 500ms 再开播（等最后一条渲染落定）。排期可取消：
  * 新一轮开始 / 退出语音模式时作废；定时器醒来时若用户已在录音/识别也跳过，
  * 旧定时器永远不会抢掉用户刚开始的对话。 */
@@ -8263,16 +8424,17 @@ function voiceCancelScheduledSpeak() {
   VOICE.speakGen++
   if (VOICE.speakTimer) { clearTimeout(VOICE.speakTimer); VOICE.speakTimer = null }
 }
-async function voiceSpeak(s, item) {
+async function speakPipeline(s, item, surface) {
   if (VOICE.state === 'recording' || VOICE.state === 'asr') return   // 不打断用户正在进行的输入
   voiceCancelScheduledSpeak()
   const key = s.id + '#' + (item.seq != null ? item.seq : (item.text || '').slice(0, 24))
-  VOICE.lastSpokenKey = key; VOICE.lastSpokenItem = item
+  VOICE.lastSpokenKey = key; VOICE.lastSpokenItem = item; VOICE.surface = surface
   // 新回复顶替旧播报：三种引擎都先停干净，避免旧回复在下面拿稿/预取期间继续出声
   vWaStop(); vElStop(); ttsStop(true); vRevokePref(); VOICE.segMode = null
   VOICE.userPaused = false; VOICE.curBuf = null; VOICE.curSeg = null; VOICE.pausedOffset = 0
-  vSetState('speaking')   // 先占状态；下面拿稿期间 word 显示"整理口语稿…"
-  vFlash('整理口语稿…')
+  vSetState('speaking')   // 先占状态；拿稿期间显示"整理口语稿…"
+  if (surface === 'voice') vFlash('整理口语稿…')
+  else { barPrepShow(); vUnlockEl() }
   let script = VOICE.scriptCache.get(key)
   if (script === undefined) {
     script = null
@@ -8295,7 +8457,8 @@ async function voiceSpeak(s, item) {
     .slice(0, 40)
   VOICE.pi = 0; VOICE.engine = 'cloud'
   VOICE.pref = VOICE.paras.map((p) => vFetchPara(p))   // 并行预取：段间零缝隙（真机反馈断断续续的根因是逐段串行请求）
-  vTick()
+  VCOOK('ok', item, script)   // 供「查看朗读稿」对照
+  if (surface === 'bar') { barPlayShow(); voiceWakeLock() } else vTick()
   vPlayNext(key)
 }
 function vPlayNext(key) {
@@ -8303,7 +8466,8 @@ function vPlayNext(key) {
   if (VOICE.pi >= VOICE.paras.length) {   // 全部播完：交给用户
     vDone(); vibrate([12, 80, 12])
     VOICE.paras = []; VOICE.pi = 0
-    vSetState('idle')
+    if (VOICE.surface === 'bar') { VOICE.state = 'idle'; barDone() }   // 浮条停驻：播报完成 · ▶ 重听
+    else vSetState('idle')
     return
   }
   Promise.resolve(VOICE.pref && VOICE.pref[VOICE.pi]).then((seg) => {
@@ -8316,12 +8480,27 @@ function vPlayNext(key) {
 }
 function vSysWatch(key) {
   clearInterval(VOICE.sysPoll)
+  let silent = 0
+  const finish = () => {
+    clearInterval(VOICE.sysPoll)
+    if (VOICE.state !== 'speaking') return
+    vDone(); vibrate([12, 80, 12]); VOICE.paras = []; VOICE.pi = 0
+    if (VOICE.surface === 'bar') { VOICE.state = 'idle'; barDone() }
+    else vSetState('idle')
+  }
   VOICE.sysPoll = setInterval(() => {
     if (VOICE.engine !== 'system' || VOICE.lastSpokenKey !== key) { clearInterval(VOICE.sysPoll); return }
-    if (!TTS.on) {   // ttsPlayIdx 播完会自己 ttsStop
-      clearInterval(VOICE.sysPoll)
-      if (VOICE.state === 'speaking') { vDone(); vibrate([12, 80, 12]); VOICE.paras = []; VOICE.pi = 0; vSetState('idle') }
-    }
+    if (!TTS.on) { finish(); return }   // ttsPlayIdx 播完会自己 ttsStop
+    // 系统语音被浏览器静默丢弃（iOS 无手势唤醒时常见：speak() 既不回调也不出声）：
+    // 连续 2.5 秒既不在说、也不在排队 → 直接收尾，绝不把浮条永久留在"正在播报"。
+    const sp = window.speechSynthesis
+    if (sp && !sp.speaking && !sp.pending) {
+      silent++
+      if (silent >= 10) {
+        ttsStop(true); finish()
+        if (VOICE.surface === 'bar') toast('自动播报被浏览器拦截 · 点 ▶ 重听', true)   // 点按是新手势，必能出声
+      }
+    } else silent = 0
   }, 250)
 }
 /* ---- 播放层：默认 Web Audio（已解锁、无手势限制）；加速时改用 <audio> 元素 ----
@@ -8349,28 +8528,42 @@ function vWaStop() {
   const r = VOICE.wResolve; VOICE.wResolve = null
   try { if (VOICE.wSrc) { VOICE.wSrc.onended = null; try { VOICE.wSrc.stop() } catch (e) {} VOICE.wSrc.disconnect() } } catch (e) {}
   VOICE.wSrc = null; VOICE.wPlaying = false
-  if (r) r(false)
+  if (r) r('stopped')   // 主动停下 ≠ 播放失败：暂停/停止/切段时不该触发系统语音兜底
 }
 function vWaPlay(buf, from) {
   vWaStop()
   if (!VAC || !buf) return Promise.resolve(false)
+  const go = () => {
+    const src = VAC.createBufferSource()
+    src.buffer = buf
+    src.playbackRate.value = 1    // 音高保护：WebAudio 不做变速（变速交给 <audio> 元素）
+    src.connect(VAC.destination)
+    VOICE.wSrc = src
+    VOICE.wStartAt = VAC.currentTime
+    VOICE.wOffset = from || 0
+    VOICE.wPlaying = true
+    try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
+    VOICE.segMode = 'wa'   // 起播即标记：暂停/续播要立刻知道当前是哪个引擎（原先等播完才标记 → 暂停变重播）
+    return new Promise((resolve) => {
+      VOICE.wResolve = resolve
+      src.onended = () => {
+        if (VOICE.wResolve === resolve) VOICE.wResolve = null
+        if (VOICE.wSrc === src) { VOICE.wSrc = null; VOICE.wPlaying = false }
+        resolve(true)
+      }
+    })
+  }
+  if (VAC.state === 'running') return go()
+  /* context 被挂起（iOS 自动播报无手势 / 后台切回）：resume 是异步的，先给它 600ms；
+     仍然挂起就返回 false——上层会降级系统语音，而不是对着静音 context 无限等 onended。 */
   try { VAC.resume().catch(() => {}) } catch (e) {}
-  const src = VAC.createBufferSource()
-  src.buffer = buf
-  src.playbackRate.value = 1    // 音高保护：WebAudio 不做变速（变速交给 <audio> 元素）
-  src.connect(VAC.destination)
-  VOICE.wSrc = src
-  VOICE.wStartAt = VAC.currentTime
-  VOICE.wOffset = from || 0
-  VOICE.wPlaying = true
-  try { src.start(0, VOICE.wOffset) } catch (e) { VOICE.wPlaying = false; return Promise.resolve(false) }
   return new Promise((resolve) => {
-    VOICE.wResolve = resolve
-    src.onended = () => {
-      if (VOICE.wResolve === resolve) VOICE.wResolve = null
-      if (VOICE.wSrc === src) { VOICE.wSrc = null; VOICE.wPlaying = false }
-      resolve(true)
-    }
+    const t0 = Date.now()
+    ;(function poll() {
+      if (VAC.state === 'running') { resolve(go()); return }
+      if (Date.now() - t0 > 600) { resolve(false); return }
+      setTimeout(poll, 60)
+    })()
   })
 }
 function vWaElapsed() {
@@ -8380,7 +8573,7 @@ function vElStop() {
   const r = VOICE.elResolve; VOICE.elResolve = null
   try { if (VOICE.el) { VOICE.el.onended = null; VOICE.el.pause() } } catch (e) {}
   VOICE.elActive = false
-  if (r) r(false)
+  if (r) r('stopped')   // 同上：主动暂停/停止不算失败
 }
 function vElPlay(seg, from) {
   const el = VOICE.el
@@ -8394,6 +8587,7 @@ function vElPlay(seg, from) {
     try { el.currentTime = from || 0 } catch (e) {}
     VOICE.elActive = true
     const p = el.play()
+    VOICE.segMode = 'el'   // 同上：起播即标记
     return new Promise((resolve) => {
       const done = (ok) => {
         if (VOICE.elResolve === done) VOICE.elResolve = null
@@ -8408,20 +8602,24 @@ function vElPlay(seg, from) {
   } catch (e) { return Promise.resolve(false) }
 }
 function vPlaySeg(seg, from) {
-  if (TTS.rate !== 1 && VOICE.elReady) {
+  const viaWa = () => vWaPlay(seg.buf, from).then((r2) => { if (r2 === true) VOICE.segMode = 'wa'; return r2 })
+  // 元素优先（已解锁时）：不依赖 AudioContext 状态、锁屏可续、保调加速一并以播放速率实现
+  if (VOICE.elReady && seg.url) {
     return vElPlay(seg, from).then((ok) => {
-      if (ok) { VOICE.segMode = 'el'; return true }
-      return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+      if (ok === true) { VOICE.segMode = 'el'; return true }
+      if (ok === 'stopped') return 'stopped'
+      return viaWa()
     })
   }
-  return vWaPlay(seg.buf, from).then((r2) => { if (r2) VOICE.segMode = 'wa'; return r2 })
+  return viaWa()
 }
 function vRunSeg(key, from) {
   const seg = VOICE.curSeg
   if (!seg) return
   vPlaySeg(seg, from).then((ok) => {
-    if (!ok) return
+    if (ok === 'stopped') return   // 暂停/停止/切段：由调用方接管，不算失败
     if (VOICE.lastSpokenKey !== key || VOICE.state !== 'speaking') return
+    if (ok !== true) { vFallbackSystem(key); return }   // 两个引擎都真起不来 → 系统语音兜底，绝不把浮条留在"正在播报"
     VOICE.pi++
     vSyncDeck()
     vPlayNext(key)
@@ -8458,11 +8656,22 @@ function vFallbackSystem(key) {
   vSetState('speaking')
   vSysWatch(key)
 }
+/* 「查看朗读稿」的数据：最近一次播报的原文与口语稿（按会话，供 ⋯ 菜单对照） */
+function VCOOK(status, item, script) {
+  if (status !== 'ok') return
+  VOICE.lastScript = script
+  VOICE.lastScriptItem = item
+  VOICE.lastScriptKey = VOICE.lastSpokenKey
+}
 function vTogglePause() {
+  vArmAudio()   // 继续播放在手势里发生：顺手把两个引擎重新解锁，避免长暂停后 context 已挂起
   if (VOICE.engine === 'system') { ttsPauseResume(); vSetState('speaking'); return }
   if (VOICE.segMode === 'el' && VOICE.el && VOICE.elActive) {
-    if (VOICE.el.paused) { try { VOICE.el.play() } catch (e) {} VOICE.userPaused = false; vResumeCue() }
-    else { try { VOICE.el.pause() } catch (e) {} VOICE.userPaused = true; vPauseCue() }
+    if (VOICE.el.paused) {
+      VOICE.userPaused = false; vResumeCue()
+      const pp = VOICE.el.play()
+      if (pp && pp.catch) pp.catch(() => { if (!VOICE.userPaused) vRunSeg(VOICE.lastSpokenKey, VOICE.pausedOffset || 0) })
+    } else { try { VOICE.el.pause() } catch (e) {} VOICE.userPaused = true; vPauseCue() }
     vSetState('speaking')
     return
   }
@@ -8498,34 +8707,118 @@ function vReplay() {
   }
   if (VOICE.state === 'idle' && VOICE.lastSpokenItem && VOICE.lastSpokenKey) {
     const s = sess(S.current)
-    if (s) voiceSpeak(s, VOICE.lastSpokenItem)   // 播完状态：重听最近一条完整回复
+    if (s) {
+      if (VOICE.surface === 'bar') readSpeak(s, VOICE.lastSpokenItem)   // 播完状态：浮条重听
+      else voiceSpeak(s, VOICE.lastSpokenItem)
+    }
   }
+}
+/* ---- 三选面板（顶栏胶囊）与模式转场 ---- */
+function openModeSheet() {
+  const id = S.current
+  if (!id) return
+  const cur = modeOf(id)
+  const body = $('#mode-list')
+  if (!body) return
+  body.textContent = ''
+  for (const key of ['text', 'read', 'voice']) {
+    const meta = MODE_META[key]
+    const row = el('div', 'ms-row mode-row' + (key === cur ? ' on' : ''))
+    row.setAttribute('role', 'button')
+    row.tabIndex = 0
+    row.setAttribute('aria-pressed', String(key === cur))
+    const ic = el('span', 'ms-row-ic')
+    ic.appendChild(icon(meta.icon, 17))
+    const mid = el('div', 'ms-row-mid')
+    mid.appendChild(el('div', 'ms-row-name', meta.name))
+    mid.appendChild(el('div', 'ms-row-desc', meta.desc))
+    const radio = el('span', 'mode-radio')
+    row.append(ic, mid, radio)
+    const pick = () => { ovSet('mode-ov', false); applyMode(id, key) }
+    row.onclick = pick
+    row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick() } }
+    body.appendChild(row)
+  }
+  body.appendChild(el('div', 'sheet-note', '朗读＝回答念给你听（自动改写口语稿）；语音＝按住说话的对讲模式。原来的「自动朗读」开关已并入这里。'))
+  ovSet('mode-ov', true)
+}
+function applyMode(id, m) {
+  const from = modeOf(id)
+  if (from === m) return
+  modeSet(id, m)
+  const s = S.sessions.get(id) || sess(id)
+  if (m === 'text') {
+    voiceStopAll()   // 双关：停采集也停播报
+    toast('文字模式 · 回答不再自动朗读')
+  } else if (m === 'read') {
+    if (from === 'voice') {
+      vStopCapture()   // 收麦；正在播的保留，表面移交浮播报条
+      if (VOICE.state === 'speaking') { VOICE.surface = 'bar'; VOICE._barHold = true; barPlayShow() }
+      toast('朗读模式 · 麦克风已收起，播报继续')
+    } else {
+      vArmAudio()   // 借这次点击把手势窗口里的两个引擎都备好（自动播报本身没有手势）
+      toast('朗读模式 · 回答将自动朗读')
+    }
+  } else if (m === 'voice') {
+    if (VOICE.state === 'speaking' && VOICE.surface === 'bar') VOICE.surface = 'voice'   // 播报随表面迁移，不打断
+    VOICE._barHold = false; VOICE._barPrep = false; VOICE._barDone = false
+    barRender(); vSetState(VOICE.state)
+    vArmAudio(); vTick()
+    toast(micAvailable() ? '语音模式：按住说话，松手发送' : '语音模式（麦克风需 HTTPS 访问）')
+  }
+  if (s) refreshChatChrome(s)
+  vibrate(8); vTick()
+}
+/* ---- 查看朗读稿（⋯ 菜单）：屏幕原文 vs 实际播报的口语稿 ---- */
+function openScriptSheet(s) {
+  if (!VOICE.lastScriptItem || !VOICE.lastScript) { toast('还没有播报过：先点一条回答下的 🔊 试试', true); return }
+  const body = $('#script-body')
+  if (!body) return
+  body.textContent = ''
+  body.appendChild(el('div', 'sc-h', '■ 屏幕原文（照常渲染）'))
+  const orig = el('div', 'sc-orig')
+  orig.innerHTML = md(VOICE.lastScriptItem.text)
+  body.appendChild(orig)
+  body.appendChild(el('div', 'sc-h', '■ 实际播报（LLM 改写的口语稿）'))
+  const scr = el('div', 'sc-script')
+  String(VOICE.lastScript).split(/\n+/).map((t) => t.trim()).filter(Boolean)
+    .forEach((p) => scr.appendChild(el('div', 'sc-line', p)))
+  body.appendChild(scr)
+  ovSet('script-ov', true)
+}
+/* ---- 语速（⋯ 菜单）：与浮条/语音甲板同一个全局档位 ---- */
+function openRatePanel(s) {
+  openSubPanel('rate', '语速', (body) => {
+    const rates = [1, 1.25, 1.5, 2]
+    const list = el('div', 'sub-list')
+    for (const r of rates) {
+      const row = btnize(el('div', 'ms-row' + (r === TTS.rate ? ' on' : '')))
+      row.onclick = () => {
+        vibrate(8)
+        setRate(r)
+        try { renderSheet(s) } catch (e) {}   // 菜单回显新档位
+        closeSubPanel()
+      }
+      const ic = el('span', 'ms-row-ic')
+      ic.appendChild(icon('speaker', 17))
+      const mid = el('div', 'ms-row-mid')
+      mid.appendChild(el('div', 'ms-row-name', fmtRate(r)))
+      const chk = el('span', 'ms-row-val', r === TTS.rate ? '✓' : '')
+      row.append(ic, mid, chk)
+      list.appendChild(row)
+    }
+    body.appendChild(list)
+    body.appendChild(el('div', 'sheet-note', '语速全局生效：浮播报条和语音模式共用一档，播报中切换从当前段起用新速度。'))
+  })
 }
 /* ---- 绑定（DOM 在 shell 里静态存在） ---- */
 function voiceBind() {
-  const vt = $('#vm-text')
-  const vv = $('#vm-voice')
-  if (vt) vt.onclick = () => {
-    const id = S.current
-    if (!id) return
-    if (!voiceMode(id)) return
-    voiceSetMode(id, false)
-    voiceStopAll()
-    const s2 = S.sessions.get(id)
-    if (s2) refreshChatChrome(s2)
-    vibrate(8); vTick()
-  }
-  if (vv) vv.onclick = () => {
-    const id = S.current
-    if (!id) return
-    const s2 = S.sessions.get(id)
-    if (!voiceMode(id)) {
-      voiceSetMode(id, true)
-      vUnlock(); vUnlockEl(); vTick(); ttsWarm()
-      if (s2) refreshChatChrome(s2)
-      toast(micAvailable() ? '语音模式：按住说话，松手发送' : '语音模式（麦克风需 HTTPS 访问）')
-    }
-  }
+  const mb = $('#vm-btn')
+  if (mb) mb.onclick = () => { vibrate(8); openModeSheet() }
+  const mc = $('#mode-close'); if (mc) mc.onclick = () => ovSet('mode-ov', false)
+  const mo = $('#mode-ov'); if (mo) mo.addEventListener('click', (e) => { if (e.target === mo) ovSet('mode-ov', false) })
+  const sc2 = $('#script-close'); if (sc2) sc2.onclick = () => ovSet('script-ov', false)
+  const so = $('#script-ov'); if (so) so.addEventListener('click', (e) => { if (e.target === so) ovSet('script-ov', false) })
   const zone = $('#v-zone')
   if (!zone) return
   zone.addEventListener('pointerdown', vOnDown)
@@ -8536,24 +8829,11 @@ function voiceBind() {
   const pp = $('#v-pp'); if (pp) pp.onclick = () => { if (VOICE.state === 'speaking') vTogglePause() }
   const rp = $('#v-replay'); if (rp) rp.onclick = () => vReplay()
   const rt = $('#v-rate')
-  const fmtR = (r) => (r % 1 ? String(r).replace(/0$/, '') : String(r)) + '×'
-  const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtR(TTS.rate)   // 语速是全局的：进语音模式先对齐显示
+  const rv = $('#v-rate-val'); if (rv) rv.textContent = fmtRate(TTS.rate)   // 语速是全局的：进语音模式先对齐显示
   if (rt) rt.onclick = () => {
-    ttsCycleRate()
-    if (rv) rv.textContent = fmtR(TTS.rate)
+    ttsCycleRate()   // setRate 统一处理：落盘、甲板/浮条显示、播报中即时变速
+    if (rv) rv.textContent = fmtRate(TTS.rate)
     vUnlockEl()
-    if (VOICE.state === 'speaking') {
-      if (VOICE.segMode === 'el' && VOICE.el) { try { VOICE.el.playbackRate = TTS.rate } catch (e) {} }
-      else if (VOICE.segMode === 'wa' && TTS.rate !== 1 && VOICE.elReady && VOICE.curSeg) {
-        // 正段从 WebAudio 切到元素播放，保持音色、从当前位置续播
-        const pos = vWaElapsed()
-        VOICE.segMode = 'el'
-        vElPlay(VOICE.curSeg, pos).then((ok) => {
-          if (!ok) return
-          if (VOICE.lastSpokenKey && VOICE.state === 'speaking') { VOICE.pi++; vSyncDeck(); vPlayNext(VOICE.lastSpokenKey) }
-        })
-      }
-    }
   }
   setInterval(() => {
     const t = $('#v-rec-time')
@@ -8592,7 +8872,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false), 'mode-ov': () => ovSet('mode-ov', false), 'script-ov': () => ovSet('script-ov', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
@@ -8605,5 +8885,5 @@ document.addEventListener('keydown', (e) => {
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
-try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat, VOICE, voiceSpeak, voiceSetMode, vTranscribeAndSend, vSubmitRecording, vFetchPara } } catch (e) {}
+try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat, VOICE, voiceSpeak, readSpeak, modeOf, modeSet, applyMode, voiceSetMode, vTranscribeAndSend, vSubmitRecording, vFetchPara } } catch (e) {}
 })()

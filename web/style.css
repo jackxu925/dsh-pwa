@@ -990,14 +990,37 @@ html.light .queue-chip { border-color: rgba(15,23,42,.22); }
 .goal-btn.danger { color:var(--red); border-color:rgba(255,69,58,.35); }
 .goal-btn:disabled { opacity:.55; }
 .goal-edit { display:block; width:calc(100% - 32px); margin:4px 16px 8px; min-height:88px; border-radius:12px; border:1px solid var(--accent); background:var(--bg-card); color:var(--text); font-size:14px; line-height:1.6; padding:10px 12px; outline:none; resize:vertical; }
-/* 朗读播报条（输入框上方，与排队条同区） */
-.tts-bar { display:none; align-items:center; gap:10px; margin:0 12px 6px; padding:8px 12px; background:var(--bg-elev); border:1px solid var(--line); border-radius:13px; }
+/* 朗读播报条（输入框上方，与排队条同区）：单行 · 状态词 · 播放暂停合一 + 语速 + 停止；
+   播完停驻「播报完成」，▶ 即重听（稿走缓存秒起播） */
+/* 听回复时整个条要显眼、好按：44px 触控目标 + 更大的声波与状态字 */
+.tts-bar { display:none; align-items:center; gap:10px; margin:0 10px 8px; padding:10px 10px 10px 14px; background:var(--bg-elev); border:1px solid var(--line); border-radius:18px; min-height:58px; transition:border-color .2s, background .2s; }
 .tts-bar.show { display:flex; }
-.tts-bar .tts-pp, .tts-bar .tts-x { background:none; border:none; color:var(--text-2); width:30px; height:30px; font-size:15px; flex:none; display:flex; align-items:center; justify-content:center; }
-.tts-bar .tts-pp { color:var(--accent); font-size:16px; }   /* 主操作用强调色图标，不用实心圆底 */
-.tts-bar .tts-info { flex:1; min-width:0; font-size:12.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.tts-bar .tts-info b { color:var(--text); font-variant-numeric:tabular-nums; }
-.tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:9px; font-size:12px; padding:4px 9px; flex:none; font-variant-numeric:tabular-nums; }
+.tts-bar .tts-pp, .tts-bar .tts-x { background:none; border:none; color:var(--text-2); width:44px; height:44px; flex:none; display:flex; align-items:center; justify-content:center; padding:0; border-radius:13px; }
+.tts-bar .tts-pp svg, .tts-bar .tts-x svg { width:22px; height:22px; display:block; }
+.tts-bar .tts-pp { color:var(--accent); }   /* 主操作用强调色图标，不用实心圆底 */
+.tts-bar .tts-pp:active, .tts-bar .tts-x:active { background:var(--bg-card-2); }
+/* 声波：播放跳动 / 暂停收短 / 整理稿慢脉动 / 播完静止 */
+.tts-wave { flex:none; display:flex; align-items:center; gap:3px; width:30px; height:26px; justify-content:center; }
+.tts-wave i { width:3.5px; height:5px; border-radius:2px; background:var(--text-3); transition:height .2s; }
+.tts-wave[data-mode="playing"] i { background:var(--accent); animation:ttsWave .9s ease-in-out infinite; }
+.tts-wave[data-mode="playing"] i:nth-child(2) { animation-delay:.15s; }
+.tts-wave[data-mode="playing"] i:nth-child(3) { animation-delay:.3s; }
+.tts-wave[data-mode="playing"] i:nth-child(4) { animation-delay:.45s; }
+.tts-wave[data-mode="playing"] i:nth-child(5) { animation-delay:.6s; }
+.tts-wave[data-mode="prep"] i { background:var(--text-3); animation:ttsWave 1.4s ease-in-out infinite; }
+.tts-wave[data-mode="prep"] i:nth-child(2) { animation-delay:.2s; }
+.tts-wave[data-mode="prep"] i:nth-child(3) { animation-delay:.4s; }
+.tts-wave[data-mode="prep"] i:nth-child(4) { animation-delay:.6s; }
+.tts-wave[data-mode="prep"] i:nth-child(5) { animation-delay:.8s; }
+.tts-wave[data-mode="paused"] i { height:6px; }
+@keyframes ttsWave { 0%,100% { height:5px; } 50% { height:22px; } }
+.tts-bar .tts-pp:disabled { opacity:.5; }
+.tts-bar .tts-info { flex:1; min-width:0; font-size:15px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:.01em; }
+.tts-bar .tts-rate { background:none; border:1px solid var(--line); color:var(--accent); border-radius:13px; font-size:14px; font-weight:600; min-height:40px; padding:0 14px; flex:none; font-variant-numeric:tabular-nums; }
+.tts-bar .tts-rate:active { background:var(--bg-card-2); }
+.tts-bar.prep .tts-info { color:var(--text-3); }
+.tts-bar.done { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--bg-elev)); }
+.tts-bar.done .tts-info { color:var(--text); }
 /* 开关（自动朗读） */
 .tg-sw { flex:none; width:44px; height:26px; border-radius:13px; background:var(--bg-card-2); border:1px solid var(--line); position:relative; transition:background .2s; }
 .tg-sw::after { content:""; position:absolute; top:2.5px; left:3px; width:19px; height:19px; border-radius:50%; background:#fff; transition:left .2s; }
@@ -1797,18 +1820,41 @@ html.light .v-cell:not(:disabled):active { background: rgba(15,23,42,.06); }
    不禁止的话整个页面会被蓝色选中高亮，且挡住按钮操作（真机实测）。 */
 .voice-view, .voice-view * { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .voice-view button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
-/* 顶栏「文字 | 语音」模式切换：两种输入模式并列，随手换（不是 ⋯ 里的功能开关） */
-.vm-seg {
-  flex: none; display: flex; align-items: center; padding: 2px;
+/* 顶栏「文字 | 朗读 | 语音」模式胶囊：平时只显示当前模式（图标+字），点开三选——
+   不常驻三段、不抢注意力；需要改的时候一步点开（真机反馈：铺开的三段像工具栏，胶囊像状态）。 */
+.vm-btn {
+  flex: none; display: flex; align-items: center; gap: 5px;
+  min-height: 28px; padding: 0 10px 0 8px; margin-right: 2px;
   background: var(--bg-elev); border: 1px solid var(--line); border-radius: 999px;
-  margin-right: 2px;
+  color: var(--text-2); font-size: 11.5px; font-family: inherit; font-weight: 500;
+  cursor: pointer; transition: border-color .16s var(--ease-out), color .16s var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
 }
-.vm-seg button {
-  min-height: 26px; padding: 0 10px; border: none; border-radius: 999px;
-  background: none; color: var(--text-2); font-size: 11.5px; font-family: inherit;
-  cursor: pointer; transition: background .16s var(--ease-out), color .16s var(--ease-out);
+.vm-btn:active { background: var(--bg-card-2); }
+.vm-btn .vm-ic { width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; }
+.vm-btn .vm-ic .ic { width: 15px !important; height: 15px !important; }
+/* 三选面板：整行可点，选中态强调色 */
+.mode-row.on { background: var(--bg-card-2); }
+.mode-row .ms-row-ic { color: var(--accent); }
+.mode-row.on .ms-row-ic { background: rgba(50,184,198,.14); }
+.mode-radio {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid var(--line-strong, var(--line)); position: relative;
 }
-.vm-seg button.on { background: var(--accent-fill); color: #fff; font-weight: 500; }
+.mode-row.on .mode-radio { border-color: var(--accent); }
+.mode-row.on .mode-radio::after {
+  content: ''; position: absolute; inset: 3.5px; border-radius: 50%; background: var(--accent);
+}
+/* 朗读稿对照（⋯ 菜单 → 查看朗读稿） */
+.script-sheet .sc-h { padding: 14px 16px 8px; font-size: 11px; letter-spacing: .08em; color: var(--text-3); font-family: var(--mono); }
+.sc-orig { margin: 0 16px; padding: 10px 13px; background: var(--bg-card); border: 1px solid var(--line); border-radius: 12px; font-size: 13px; line-height: 1.7; color: var(--text-2); max-height: 32vh; overflow-y: auto; }
+.sc-orig :is(h1,h2,h3,h4) { color: var(--text); font-size: 14px; margin: 4px 0 6px; }
+.sc-orig p { margin: 5px 0; }
+.sc-orig pre { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; overflow-x: auto; font-size: 11px; }
+.sc-orig table { border-collapse: collapse; font-size: 11.5px; }
+.sc-orig th, .sc-orig td { border: 1px solid var(--line); padding: 3px 7px; }
+.sc-script { margin: 0 16px 6px; }
+.sc-line { padding: 8px 12px; border-left: 2px solid var(--accent); margin: 6px 0; font-size: 13.5px; line-height: 1.7; color: var(--text); background: var(--bg-card); border-radius: 0 10px 10px 0; }
 /* ============ 语音模式：整屏状态色（用户指定：用颜色表达"正在做什么"，替代口播"我在想"） ============ */
 .v-amb { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .5s ease; }
 .v-amb.v-a-idle { background: radial-gradient(120% 80% at 50% 0%, rgba(106,166,255,.05), transparent 70%); }

@@ -29,7 +29,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 
 ## Features
 
-- 🎙 **Voice mode (walkie-talkie)**: switch with the Text | Voice control in the chat header — hold to talk, release to send, swipe up to cancel, hold to barge in, tap to pause. Replies are rewritten into a spoken script by the harness LLM, then every paragraph is synthesized in parallel and played gaplessly with DeepSeek TTS (rate changes keep the timbre). **Full-screen state colors** replace spoken status chatter: recording red / transcribing purple / thinking amber / speaking blue. The capture pipeline fights wind noise (100 Hz high-pass + automatic level normalization), a visible 2-minute cap auto-sends, and an ASR failure keeps the audio — tap to retry. Connection drops never replay the previous reply: history re-sync only redraws the timeline, it does not restart speech.
+- 🎛 **Three-mode switcher (Text | Read | Voice)**: a small icon + current-mode capsule in the chat header opens a three-way picker — it sits quietly in one button slot instead of stretching a segmented control across the bar. **Read mode** = keyboard input, auto-spoken replies: the screen keeps the original markup while the audio follows an LLM-rewritten spoken script (lists become ordinals, tables become key-points, code is described, numbers are written the way they are said). The floating player has just play/pause, rate and stop; when it finishes it stays as "播报完成" with ▶ to replay, and "View script" in the ⋯ menu compares the on-screen text with what was actually spoken. **Voice mode (walkie-talkie)** = hold to talk, release to send, swipe up to cancel, hold to barge in, tap to pause. Both modes share one playback pipeline (rewrite → parallel cloud synthesis → gapless playback with pitch-preserving rate changes; falls back to the system voice without a key). Voice mode also keeps **full-screen state colors**: recording red / transcribing purple / thinking amber / speaking blue. The capture pipeline fights wind noise (100 Hz high-pass + automatic level normalization), a visible 2-minute cap auto-sends, and an ASR failure keeps the audio — tap to retry. Connection drops never replay the previous reply: history re-sync only redraws the timeline, it does not restart speech.
 - 📋 **Session list** with last-message previews, unread dots, day grouping, workspace grouping, pull-to-refresh, a "needs attention" filter (pending approvals / questions), and a per-card ⋯ menu for pin / unpin, rename / fork / archive
 - 👥 **Agent Teams & sub-sessions**: a team signal on the Lead's session card, an in-chat team band that opens a read-only roster + task board (with write-scope overlap hints), and member child sessions with lineage, real mode chips (continuable / one-shot) and teammate relay bubbles — no new home tab; one-shot children and continuable children whose direct parent is offline stay read-only
 - 🗂 **Session info menu**: the ⋯ sheet shows the session title, Session ID and working path (tap either to copy), with settings grouped into chat / content / manage sections
@@ -39,7 +39,7 @@ If you want Android system notifications and certificate-pinned device pairing, 
 - 📦 **Deliverables & workspace files**: files the agent `present`s become timeline cards (inline image and video preview, direct text read) with share/AirDrop and open-on-Mac actions; the ⋯ menu browses the whole session workspace with per-turn change hints
 - ⏰ **Reminder center**: a third home tab lists every reminder your agents created — humanized schedules, next-fire countdowns, delivery history; delete in place or jump back to the origin session to reschedule
 - 👍👎 **Message feedback**: thumbs up/down on any assistant message (tap again to retract), synced live with the desktop feedback store
-- 🧠 **Context transparency**: per-turn stats (duration / TTFT / decode speed / tokens), a reasoning drawer, TTS read-aloud, and **compaction markers** — when older context is condensed into a summary, the timeline says so and shows the summary
+- 🧠 **Context transparency**: per-turn stats (duration / TTFT / decode speed / tokens), a reasoning drawer, read-aloud/spoken replies (rewritten script), and **compaction markers** — when older context is condensed into a summary, the timeline says so and shows the summary
 - 🎯 **Goal management**: banner + action panel (pause / resume / edit / delete) with timeline markers
 - 🖼️ Send images from camera / photo library / clipboard paste (auto-compressed to the model's limits)
 - 🔐 **In-app re-login**: when auth expires, paste the `dsh web` startup link (or bare token) to mint a fresh login inside the app — no reinstall needed despite iOS home-screen apps having an isolated cookie jar from Safari
@@ -106,7 +106,7 @@ Iterating on the UI needs no restart: files are re-read per request, just refres
 |---|---|
 | ![session list](assets/screenshot-sessions.png) | ![chat](assets/screenshot-chat.png) |
 
-| Voice mode: Text \| Voice switch + hold-to-talk | State colors: record / transcribe / think / speak |
+| Voice mode: mode capsule + hold-to-talk | State colors: record / transcribe / think / speak |
 |---|---|
 | ![voice mode switch](assets/screenshot-voice-switch.png) | ![voice state colors](assets/screenshot-voice-states.png) |
 
