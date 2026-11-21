@@ -53,3 +53,7 @@ console.log(`smoke: OK (${expected.length} routes, /m/health 200, dispose clean)
 // The media route's unit test rides this existing CI step (the agent token cannot
 // edit .github/workflows): importing it runs its assertions and summary here.
 await import('./media.mjs')
+
+// Same for the spoken-script rewrite gate: it protects read mode from playing a
+// script that the model cut off mid-sentence.
+await import('./voice.mjs')
