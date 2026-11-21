@@ -57,3 +57,6 @@ await import('./media.mjs')
 // Same for the spoken-script rewrite gate: it protects read mode from playing a
 // script that the model cut off mid-sentence.
 await import('./voice.mjs')
+
+// Same pattern for the phone's CJK-safe content index and its search route.
+await import('./search.mjs')
