@@ -1,10 +1,11 @@
 name: Publish
 
 on:
+  # Publishing a GitHub Release is the one action that ships a version.
+  release:
+    types: [published]
+  # Manual re-run escape hatch.
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 # Trusted publishing (OIDC): no NPM_TOKEN secret, no 2FA prompt.
 # The npm package must have this repo + workflow registered as a trusted publisher.
@@ -29,5 +30,30 @@ jobs:
           npm install -g npm@latest
           npm --version
 
+      # A release tag and the package version must agree, otherwise npm would
+      # publish something unrelated to what was released.
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          V=$(node -p "require('./package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          if [ "v$V" != "$TAG" ]; then
+            echo "::error::Release tag '$TAG' does not match package.json version 'v$V'. Bump package.json version first (and web/index.html ?v=)."
+            exit 1
+          fi
+
+      # Re-running a release must not fail the workflow: skip an already-published version.
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view "dsh-pwa@$V" version >/dev/null 2>&1; then
+            echo "dsh-pwa@$V is already published — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
         run: npm publish --provenance --access public
