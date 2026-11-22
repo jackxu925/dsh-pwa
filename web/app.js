@@ -1191,6 +1191,8 @@ function toolNode(item) {
   head.append(state, chev)
   const body = el('div', 'tool-body')
   const pre = el('pre')
+  pre.dataset.selectable = ''   // 选区片段引用：展开后可框选命令/输出
+  pre.dataset.label = '工具·' + (item.name || '调用')
   let detail = ''
   if (item.name === 'bash' && item.args.command) detail += '$ ' + item.args.command + '\n'
   if (item.result) detail += (detail ? '\n' : '') + item.result
@@ -1961,6 +1963,91 @@ function focusNote(note) {
   // 兜底：若首次 focus 没生效，下一帧再试（此时已非手势内，只保证光标在位，键盘靠上面那次同步 focus）
   if (document.activeElement !== note) requestAnimationFrame(() => { if (document.activeElement !== note) { try { note.focus({ preventScroll: true }) } catch (e) {} } })
 }
+/* ================= 选区片段引用：框选文字 → 浮动「引用」 =================
+   在消息/工具内容里框选一段文字，选区下方浮出「引用」；点它 = quoteNow(sid, label, 选中文本)，
+   与每条消息下方常驻的 ❝ 按钮完全同一条路（进引用 chips 条 + 立即弹注解面板），下游不用改。
+   系统原生菜单（拷贝/查询/翻译/共享）出现在选区上方，本浮钮固定放选区下方，二者上下错开不遮挡。
+   触屏要点：pointerdown 必须 preventDefault 保住选区，否则 iOS/Android 会先清选区、click 时读不到文字。 */
+function initQuoteSelection() {
+  const host = $('#view-chat')
+  const pill = $('#qpill')
+  const scroller = $('#chat-scroll')
+  const composer = $('.composer-wrap')
+  if (!host || !pill || !scroller) return
+  const SELECTABLE = '[data-selectable]'
+  let selTimer = null
+  let last = null   // 最近一次通过校验的 {text, label}
+
+  const hide = () => { pill.classList.remove('show') }
+
+  // 读当前选区：必须完整落在同一个 [data-selectable] 元素内（同一气泡，不跨消息）
+  function readSelection() {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+    const text = String(sel).replace(/\s+\n/g, '\n').trim()
+    if (!text) return null
+    const range = sel.getRangeAt(0)
+    const node = range.commonAncestorContainer
+    const elm = node.nodeType === 1 ? node : node.parentElement
+    const box = elm && elm.closest ? elm.closest(SELECTABLE) : null
+    if (!box || !box.contains(range.startContainer) || !box.contains(range.endContainer)) return null
+    return { range, text, box }
+  }
+
+  // 定位：选区下方居中；下方空间不够（贴输入区/可视底）则翻到选区上方，并额外让开系统菜单高度
+  function place(range) {
+    const rects = [].slice.call(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+    if (!rects.length) return null
+    const first = rects[0]
+    const lastRect = rects[rects.length - 1]
+    const hr = host.getBoundingClientRect()
+    const pw = pill.offsetWidth || 90
+    const ph = pill.offsetHeight || 34
+    const cwTop = composer ? composer.getBoundingClientRect().top - hr.top : hr.height
+    const limit = Math.min(hr.height, cwTop) - 6
+    let x = lastRect.left + lastRect.width / 2 - hr.left
+    x = Math.max(10 + pw / 2, Math.min(x, hr.width - 10 - pw / 2))
+    let y = lastRect.bottom - hr.top + 8
+    if (y + ph > limit) y = first.top - hr.top - ph - 8 - 42
+    if (y < 6) return null
+    return { x, y }
+  }
+
+  function refresh() {
+    if (!host.classList.contains('active')) { hide(); return }
+    const ctx = readSelection()
+    if (!ctx) { hide(); return }
+    const pos = place(ctx.range)
+    if (!pos) { hide(); return }
+    pill.style.left = Math.round(pos.x) + 'px'
+    pill.style.top = Math.round(pos.y) + 'px'
+    pill.classList.add('show')
+    last = { text: ctx.text, label: ctx.box.getAttribute('data-label') || '助手' }
+  }
+
+  // 选区变化：防抖结算（触屏拖句柄会连续触发，只认最后一次）
+  document.addEventListener('selectionchange', () => {
+    clearTimeout(selTimer)
+    selTimer = setTimeout(refresh, 70)
+  })
+  // 点会话内别处收起（点浮钮本身不收起，否则选不中）
+  document.addEventListener('pointerdown', (e) => { if (!pill.contains(e.target)) hide() }, true)
+  scroller.addEventListener('scroll', hide, { passive: true })
+  window.addEventListener('resize', hide)
+
+  pill.addEventListener('pointerdown', (e) => e.preventDefault())
+  pill.addEventListener('click', () => {
+    const ctx = readSelection()
+    const text = ctx ? ctx.text : (last && last.text)
+    const label = ctx ? (ctx.box.getAttribute('data-label') || '助手') : (last && last.label)
+    if (!text || !S.current) { hide(); return }
+    const sel = window.getSelection()
+    if (sel && sel.removeAllRanges) sel.removeAllRanges()
+    hide()
+    last = null
+    quoteNow(S.current, label || '助手', text)   // 复用现有入口：进 chips + 弹注解面板
+  })
+}
 /* 条目的稳定标识：翻页（loadEarlier）后要按它把视口锚回原位。
    用事件自带的 id，不用下标（前面插入旧消息后下标会整体位移）。 */
 function itemKey(item) {
@@ -1983,6 +2070,8 @@ function itemNodeInner(s, item) {
       const m = el('div', 'msg user')
       m.dataset.q = item.rpcId || item.time || ''
       const b = el('div', 'bubble' + (item.pending ? ' pending' : '') + (item.failed ? ' failed' : ''))
+      b.dataset.selectable = ''   // 选区片段引用：框选自己发的文字 → 浮动「引用」
+      b.dataset.label = '用户'
       const parsed = parseQuotedMessage(item.text)
       if (parsed) {
         // 引用消息：引用块（含来源）+【注】+ 正文分层显示，原文仍是纯文本（协议兼容）
@@ -2027,6 +2116,8 @@ function itemNodeInner(s, item) {
       head.appendChild(el('span', 'peer-tag', '团队消息'))
       head.appendChild(el('span', 'peer-time', fmtTime(item.time)))
       const b = el('div', 'bubble')
+      b.dataset.selectable = ''   // 选区片段引用：框选团队消息内文字 → 浮动「引用」
+      b.dataset.label = '团队·' + (item.senderName || '消息')
       if (item.text) b.innerHTML = md(item.text)
       if (item.images) appendMessageImages(s, b, item.images)
       m.append(head, b)
@@ -2044,6 +2135,8 @@ function itemNodeInner(s, item) {
       const m = el('div', 'msg bot')
       if (item.seq != null) m.dataset.seq = String(item.seq)   // 实时 pill 靠它定位「本轮最后一条助手消息」
       const b = el('div', 'bubble')
+      b.dataset.selectable = ''   // 选区片段引用：框选回答内文字 → 浮动「引用」
+      b.dataset.label = '助手'
       b.innerHTML = md(item.text)
       m.appendChild(b)
       // meta 行：时间 · 复制 · 思考（左对齐）
@@ -7996,6 +8089,7 @@ function buildShell() {
     <button class="dels-strip" id="dels-strip" type="button" aria-label="查看本会话的交付物" style="display:none"></button>
     <div class="goal-bar" id="goal-bar" role="button" tabindex="0" aria-label="目标" style="display:none"></div>
     <div class="chat-scroll" id="chat-scroll"></div>
+    <button class="qpill" id="qpill" type="button" aria-label="引用选中的文字"><span class="qp-ic" data-ic="quote"></span><span class="qp-tx">引用</span></button>
     <button class="q-handle" id="q-handle" type="button" aria-label="问过的问题" aria-expanded="false"><span class="qh-ic" data-ic="qlist"></span></button>
     <div class="q-scrim" id="q-scrim"></div>
     <div class="q-drawer" id="q-drawer" role="dialog" aria-label="问过的问题" aria-hidden="true">
@@ -8570,6 +8664,8 @@ function buildShell() {
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
   // 会话长按操作单：初始化 + 背景关闭
   initSessionLongPress($('#list-scroll'))
+  // 选区片段引用：框选消息里的文字 → 浮动「引用」（复用 quoteNow 进 chips + 注解面板）
+  initQuoteSelection()
   $('#sess-ov').addEventListener('click', (e) => { if (e.target.id === 'sess-ov') closeSessionMenu() })
 }
 

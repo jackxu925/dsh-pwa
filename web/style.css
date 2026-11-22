@@ -1139,6 +1139,26 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
 .qt-chip .nd { flex:none; width:6px; height:6px; border-radius:50%; background:var(--orange); }
 .qt-chip .rm { flex:none; border:none; background:none; color:var(--text-3); font-size:13px; padding:2px 3px; cursor:pointer; min-width:20px; min-height:20px; }
 .qt-chip .rm:active { color:var(--red); }
+/* 选区片段引用：浮动「引用」按钮（网页浮钮；系统菜单在选区上方，本钮固定放其下方错开） */
+.qpill {
+  position:absolute; z-index:30; left:0; top:0;
+  display:inline-flex; align-items:center; gap:6px;
+  padding:8px 13px; border-radius:11px;
+  background:var(--bg-card-2); color:#eaf1ff;
+  border:1px solid rgba(59,130,246,.5);
+  font-family:var(--font); font-size:13px; font-weight:600; line-height:1;
+  box-shadow:0 10px 26px -6px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
+  transform:translate(-50%,0) scale(.92); transform-origin:50% 0;
+  opacity:0; visibility:hidden; pointer-events:none;
+  transition:opacity .15s var(--ease-out), transform .15s var(--ease-out);
+}
+.qpill.show { opacity:1; visibility:visible; pointer-events:auto; transform:translate(-50%,0) scale(1); }
+.qpill:active { background:var(--bg-card); }
+.qpill .qp-ic { width:14px; height:14px; color:var(--info); flex:none; display:flex; }
+.qpill .qp-ic svg { width:14px; height:14px; display:block; }
+.qpill .qp-tx { white-space:nowrap; }
+html.light .qpill { background:#eef4ff; color:#0b1a33; border-color:rgba(37,99,235,.4); box-shadow:0 10px 26px -6px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.16); }
+html.light .qpill:active { background:#dfe9fd; }
 /* 注解面板 */
 .quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:9px 12px; font-size:12px; line-height:1.55; color:var(--text-2); max-height:16vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
 .note-in { flex:1; margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:14px; padding:13px 14px; font-size:15px; line-height:1.6; color:var(--text); min-height:96px; overflow-y:auto; outline:none; white-space:pre-wrap; overflow-wrap:break-word; -webkit-user-modify:read-write-plaintext-only; transition:border-color .2s; }
