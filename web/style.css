@@ -1139,7 +1139,7 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
 .qt-chip .nd { flex:none; width:6px; height:6px; border-radius:50%; background:var(--orange); }
 .qt-chip .rm { flex:none; border:none; background:none; color:var(--text-3); font-size:13px; padding:2px 3px; cursor:pointer; min-width:20px; min-height:20px; }
 .qt-chip .rm:active { color:var(--red); }
-/* 选区片段引用：浮动「引用」按钮（网页浮钮；系统菜单在选区上方，本钮固定放其下方错开） */
+/* 选区片段引用：悬浮「引用」按钮（触屏停靠输入区上沿；鼠标环境贴着选区） */
 .qpill {
   position:absolute; z-index:30; left:0; top:0;
   display:inline-flex; align-items:center; gap:6px;
@@ -1148,7 +1148,7 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
   border:1px solid rgba(59,130,246,.5);
   font-family:var(--font); font-size:13px; font-weight:600; line-height:1;
   box-shadow:0 10px 26px -6px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
-  transform:translate(-50%,0) scale(.92); transform-origin:50% 0;
+  transform:translate(-50%,4px) scale(.94); transform-origin:50% 100%;
   opacity:0; visibility:hidden; pointer-events:none;
   transition:opacity .15s var(--ease-out), transform .15s var(--ease-out);
 }

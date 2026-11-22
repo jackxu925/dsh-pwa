@@ -1963,11 +1963,15 @@ function focusNote(note) {
   // 兜底：若首次 focus 没生效，下一帧再试（此时已非手势内，只保证光标在位，键盘靠上面那次同步 focus）
   if (document.activeElement !== note) requestAnimationFrame(() => { if (document.activeElement !== note) { try { note.focus({ preventScroll: true }) } catch (e) {} } })
 }
-/* ================= 选区片段引用：框选文字 → 浮动「引用」 =================
-   在消息/工具内容里框选一段文字，选区下方浮出「引用」；点它 = quoteNow(sid, label, 选中文本)，
+/* ================= 选区片段引用：框选文字 → 「引用」悬浮钮 =================
+   在消息/工具内容里框选一段文字，浮出「引用」；点它 = quoteNow(sid, label, 选中文本)，
    与每条消息下方常驻的 ❝ 按钮完全同一条路（进引用 chips 条 + 立即弹注解面板），下游不用改。
-   系统原生菜单（拷贝/查询/翻译/共享）出现在选区上方，本浮钮固定放选区下方，二者上下错开不遮挡。
+   位置：触屏停靠在输入区上沿，鼠标环境仍贴着选区。系统原生菜单（拷贝/查询/翻译/共享）必定
+   出现在选区上下那一小段里，空间不够时还会翻到另一侧；而选区可能停在屏幕任意高度，触屏上
+   贴着选区怎么放都可能被压住（上一版让开 42px 仍不够高）。输入区上沿隔着整段对话内容，
+   菜单两个方向都够不到，引用钮不会再被盖住。
    触屏要点：pointerdown 必须 preventDefault 保住选区，否则 iOS/Android 会先清选区、click 时读不到文字。 */
+const isCoarsePointer = () => matchMedia('(any-pointer: coarse)').matches
 function initQuoteSelection() {
   const host = $('#view-chat')
   const pill = $('#qpill')
@@ -1994,22 +1998,30 @@ function initQuoteSelection() {
     return { range, text, box }
   }
 
-  // 定位：选区下方居中；下方空间不够（贴输入区/可视底）则翻到选区上方，并额外让开系统菜单高度
+  // 触屏设备：系统原生菜单（拷贝/查询/翻译/共享）必定出现在选区上下的一小段里，空间不够时
+  // 还会翻到另一侧；而选区可以停在屏幕任意高度，贴着选区怎么放都可能被压住（让开 42px 也不够）。
+  // 所以触屏一律停靠在输入区上沿——那里离选区隔着整段对话内容，菜单两个方向都够不到。
+  // 鼠标环境没有原生菜单，仍保留贴近选区的浮钮（在输入区前翻到选区上方）。
   function place(range) {
-    const rects = [].slice.call(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
-    if (!rects.length) return null
-    const first = rects[0]
-    const lastRect = rects[rects.length - 1]
     const hr = host.getBoundingClientRect()
     const pw = pill.offsetWidth || 90
     const ph = pill.offsetHeight || 34
-    const cwTop = composer ? composer.getBoundingClientRect().top - hr.top : hr.height
-    const limit = Math.min(hr.height, cwTop) - 6
-    let x = lastRect.left + lastRect.width / 2 - hr.left
-    x = Math.max(10 + pw / 2, Math.min(x, hr.width - 10 - pw / 2))
-    let y = lastRect.bottom - hr.top + 8
-    if (y + ph > limit) y = first.top - hr.top - ph - 8 - 42
+    const composerTop = composer ? composer.getBoundingClientRect().top - hr.top : hr.height
+    let x, y
+    if (isCoarsePointer()) {
+      y = composerTop - 10 - ph
+      x = hr.width / 2
+    } else {
+      const rects = [].slice.call(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+      if (!rects.length) return null
+      const first = rects[0]
+      const lastRect = rects[rects.length - 1]
+      x = lastRect.left + lastRect.width / 2 - hr.left
+      y = lastRect.bottom - hr.top + 8
+      if (y + ph > composerTop - 6) y = first.top - hr.top - ph - 8
+    }
     if (y < 6) return null
+    x = Math.max(10 + pw / 2, Math.min(x, hr.width - 10 - pw / 2))
     return { x, y }
   }
 
@@ -2036,7 +2048,8 @@ function initQuoteSelection() {
   window.addEventListener('resize', hide)
 
   pill.addEventListener('pointerdown', (e) => e.preventDefault())
-  pill.addEventListener('click', () => {
+  // 走 onTap：iOS 上系统菜单关闭时合成 click 可能被吞掉；touchend 触发更可靠（AUDIT #56）
+  onTap(pill, () => {
     const ctx = readSelection()
     const text = ctx ? ctx.text : (last && last.text)
     const label = ctx ? (ctx.box.getAttribute('data-label') || '助手') : (last && last.label)
