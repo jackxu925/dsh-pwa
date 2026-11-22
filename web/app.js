@@ -113,6 +113,11 @@ const ICONS = {
   copy: SVG_OPEN + '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   check: SVG_OPEN + '<path d="m4.5 12.5 5 5 10-11"/></svg>',
   chev: SVG_OPEN + '<path d="m9 6 6 6-6 6"/></svg>',
+  close: SVG_OPEN + '<path d="M6 6l12 12M18 6 6 18"/></svg>',
+  share: SVG_OPEN + '<path d="M12 15V4M8.5 7.5 12 4l3.5 3.5M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
+  download: SVG_OPEN + '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>',
+  zoomIn: SVG_OPEN + '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21M8 10.5h5M10.5 8v5"/></svg>',
+  zoomOut: SVG_OPEN + '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21M8 10.5h5"/></svg>',
   chart: SVG_OPEN + '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   speaker: SVG_OPEN + '<path d="M3 9.5v5h3.5L12 19V5L6.5 9.5z"/><path d="M15.5 8.8a4.6 4.6 0 0 1 0 6.4M18 6.3a8 8 0 0 1 0 11.4"/>',
   mic: SVG_OPEN + '<rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/>',
@@ -591,35 +596,79 @@ async function refreshSessionProjections(s) {
 }
 
 /* ================= 图片 ================= */
-const attachCache = new Map()  // attachmentId → dataUrl
+const attachCache = new Map()   // attachmentId → { url, ar? }
+const attachPending = new Map() // attachmentId → Promise<dataUrl>
+
+/* 同一个附件并发读取只发一次；气泡、网格和查看器共用这份缓存。 */
+function attachmentUrl(s, ref) {
+  const id = ref.attachmentId
+  if (!s || !s.id) return Promise.reject(new Error('missing session for attachment'))
+  const cached = attachCache.get(id)
+  if (cached && cached.url) return Promise.resolve(cached.url)
+  if (attachPending.has(id)) return attachPending.get(id)
+  const p = rpc('session/attachment', { request: { sessionId: s.id, attachmentId: id } })
+    .then((v) => {
+      const url = 'data:' + (v.attachment.mediaType || ref.mediaType) + ';base64,' + v.data
+      attachCache.set(id, Object.assign({}, attachCache.get(id) || {}, { url }))
+      return url
+    })
+    .finally(() => attachPending.delete(id))
+  attachPending.set(id, p)
+  return p
+}
+
 function imageBlocksOf(content) {
   if (!Array.isArray(content)) return []
   return content
     .filter((b) => b && b.type === 'image')
-    .map((b) => ({
-      attachmentId: b.attachment && b.attachment.attachmentId,
-      mediaType: (b.attachment && b.attachment.mediaType) || b.mediaType || 'image/png',
-    }))
+    .map((b) => {
+      const a = b.attachment || {}
+      return {
+        attachmentId: a.attachmentId,
+        mediaType: a.mediaType || b.mediaType || 'image/png',
+        name: a.name || b.name || '',
+        width: a.width || b.width || 0,
+        height: a.height || b.height || 0,
+        bytes: a.bytes || b.bytes || 0,
+      }
+    })
     .filter((b) => b.attachmentId)
 }
-function attachImgEl(s, ref) {
+
+function imageName(image, index) {
+  return (image && image.name) || ('图片 ' + ((index || 0) + 1))
+}
+
+function imageAspect(image) {
+  if (!image) return ''
+  if (image.ar) return image.ar
+  if (image.width && image.height) return image.width + ' / ' + image.height
+  return ''
+}
+
+/* 单图：保留原来的自然宽高布局；点击交给聊天区委派，打开既可切换也可缩放的查看器。 */
+function attachImgEl(s, ref, meta) {
   const img = el('img', 'msg-img')
-  img.alt = '图片'
+  img.alt = ref.name || '图片'
   img.loading = 'lazy'
+  if (meta) {
+    img._gallery = meta
+    img.tabIndex = 0
+    img.setAttribute('role', 'button')
+    img.setAttribute('aria-label', '查看图片：' + (ref.name || '图片'))
+  }
   const cached = attachCache.get(ref.attachmentId)
-  const ar = ref.ar || (cached && cached.ar)
+  const ar = imageAspect(ref) || (cached && cached.ar)
   if (ar) img.style.aspectRatio = ar  // 首次加载后记住宽高比：之后每次重建都零跳变
-  if (cached) { img.src = cached.url; return img }
+  if (cached && cached.url) { img.src = cached.url; return img }
   if (!ar) { img.style.background = 'var(--bg-card-2)'; img.style.minHeight = '80px' }
-  rpc('session/attachment', { request: { sessionId: s.id, attachmentId: ref.attachmentId } })
-    .then((v) => {
-      const url = 'data:' + (v.attachment.mediaType || ref.mediaType) + ';base64,' + v.data
-      attachCache.set(ref.attachmentId, { url })
+  attachmentUrl(s, ref)
+    .then((url) => {
       img.style.minHeight = ''
       img.onload = () => {
         if (img.naturalWidth) {
           ref.ar = img.naturalWidth + ' / ' + img.naturalHeight
-          attachCache.set(ref.attachmentId, { url, ar: ref.ar })
+          attachCache.set(ref.attachmentId, Object.assign({}, attachCache.get(ref.attachmentId) || {}, { ar: ref.ar }))
         }
       }
       img.src = url
@@ -628,10 +677,86 @@ function attachImgEl(s, ref) {
       // 失败不静默移除：留下可重试的占位，避免消息「少了一块」而用户无感知
       const box = el('button', 'img-fail', '图片加载失败 · 点按重试')
       box.type = 'button'
-      box.onclick = () => box.replaceWith(attachImgEl(s, ref))
+      box.onclick = (e) => { e.stopPropagation(); box.replaceWith(attachImgEl(s, ref, meta)) }
       img.replaceWith(box)
     })
   return img
+}
+
+/* 多图：一条消息只占一块，按数量换版式；第 5 张起收进 +N，查看器里仍能翻到。 */
+function imageGridNode(s, images) {
+  const usable = images.filter((im) => im && (im.previewUrl || im.attachmentId))
+  const grid = el('div', 'msg-gallery')
+  const shown = usable.slice(0, 4)
+  grid.dataset.count = String(shown.length)
+  shown.forEach((image, i) => {
+    const tile = el('button', 'msg-shot')
+    tile.type = 'button'
+    const name = imageName(image, i)
+    const openLabel = '打开图片 ' + (i + 1) + ' / ' + usable.length + '：' + name
+    tile.setAttribute('aria-label', openLabel)
+    const im = el('img')
+    im.alt = name
+    im.decoding = 'async'
+    im.draggable = false
+    im.onerror = () => { tile.classList.remove('is-loading'); tile.classList.add('is-error') }
+    tile.appendChild(im)
+    if (usable.length > 4 && i === 3) tile.appendChild(el('span', 'msg-shot-more', '+' + (usable.length - shown.length)))
+    const load = () => {
+      tile.classList.remove('is-error')
+      if (image.previewUrl) {
+        im.src = image.previewUrl
+        tile.classList.add('is-loaded')
+        return
+      }
+      tile.classList.add('is-loading')
+      attachmentUrl(s, image)
+        .then((url) => {
+          im.src = url
+          tile.classList.remove('is-loading')
+          tile.classList.add('is-loaded')
+          tile.setAttribute('aria-label', openLabel)
+        })
+        .catch(() => {
+          tile.classList.remove('is-loading')
+          tile.classList.add('is-error')
+          tile.setAttribute('aria-label', '图片加载失败，点按重试：' + name)
+        })
+    }
+    tile.onclick = () => {
+      if (tile.classList.contains('is-error')) { load(); return }
+      openImageGallery(s, usable, i, tile)
+    }
+    load()
+    grid.appendChild(tile)
+  })
+  return grid
+}
+
+/* 消息里的图片统一入口：1 张保持原图宽高，多张进网格；两个渲染路径（用户/队友）共用。 */
+function appendMessageImages(s, bubble, images) {
+  const usable = (images || []).filter((im) => im && (im.previewUrl || im.attachmentId))
+  if (!usable.length) return
+  if (usable.length === 1) {
+    const image = usable[0]
+    const meta = { s, images: usable, index: 0 }
+    if (image.previewUrl) {
+      const im = el('img', 'msg-img')
+      im.src = image.previewUrl
+      im.alt = image.name || '图片'
+      const ar = imageAspect(image)
+      if (ar) im.style.aspectRatio = ar
+      im._gallery = meta
+      im.tabIndex = 0
+      im.setAttribute('role', 'button')
+      im.setAttribute('aria-label', '查看图片：' + (image.name || '图片'))
+      bubble.appendChild(im)
+    } else {
+      bubble.appendChild(attachImgEl(s, image, meta))
+    }
+  } else {
+    bubble.appendChild(imageGridNode(s, usable))
+  }
 }
 /* 读取+压缩（长边 1600 / 超限转 jpeg） */
 function fileToImage(file) {
@@ -1335,21 +1460,316 @@ function showNewMsgPill() {
 }
 function hideNewMsgPill() { const p = $('#new-msg-pill'); if (p) p.classList.remove('show') }
 
-/* 图片查看器 */
-function openImageViewer(src) {
+/* 图片查看器：单图也能当 1/1 画廊；多图左右滑，双击/按钮缩放，保存/分享。 */
+const imgView = {
+  s: null, images: [], index: 0, zoom: 1, panX: 0, panY: 0,
+  opener: null, open: false, token: 0, drag: null, swipe: null,
+}
+
+function ensureImageViewer() {
   let ov = $('#img-viewer')
-  if (!ov) {
-    ov = el('div', 'img-viewer')
-    ov.id = 'img-viewer'
-    ov.setAttribute('aria-hidden', 'true')
-    ov.onclick = () => ovSet('img-viewer', false)
-    document.body.appendChild(ov)
+  if (ov) return ov
+  ov = el('div', 'img-viewer')
+  ov.id = 'img-viewer'
+  ov.setAttribute('role', 'dialog')
+  ov.setAttribute('aria-modal', 'true')
+  ov.setAttribute('aria-label', '图片预览')
+  ov.setAttribute('aria-hidden', 'true')
+
+  const top = el('div', 'ig-top')
+  const close = el('button', 'ig-btn')
+  close.type = 'button'; close.id = 'ig-close'; close.setAttribute('aria-label', '关闭图片预览')
+  close.appendChild(icon('close', 18))
+  const count = el('span', 'ig-count'); count.id = 'ig-count'
+  const share = el('button', 'ig-btn')
+  share.type = 'button'; share.id = 'ig-share'; share.setAttribute('aria-label', '分享图片')
+  share.appendChild(icon('share', 18))
+  top.append(close, count, share)
+
+  const prev = el('button', 'ig-nav ig-prev')
+  prev.type = 'button'; prev.id = 'ig-prev'; prev.setAttribute('aria-label', '上一张')
+  prev.appendChild(icon('back', 18))
+  const next = el('button', 'ig-nav ig-next')
+  next.type = 'button'; next.id = 'ig-next'; next.setAttribute('aria-label', '下一张')
+  next.appendChild(icon('chev', 18))
+
+  const stage = el('div', 'ig-stage'); stage.id = 'ig-stage'
+  const img = el('img'); img.id = 'ig-img'; img.alt = ''; img.draggable = false
+  const status = el('div', 'ig-status'); status.id = 'ig-status'; status.hidden = true
+  stage.append(img, status)
+
+  const bottom = el('div', 'ig-bottom')
+  const caption = el('div', 'ig-caption'); caption.id = 'ig-caption'
+  const meta = el('div', 'ig-meta'); meta.id = 'ig-meta'
+  const cap = el('div', 'ig-cap'); cap.append(caption, meta)
+  const actions = el('div', 'ig-actions')
+  const zoomOut = el('button', 'ig-act')
+  zoomOut.type = 'button'; zoomOut.id = 'ig-zoom-out'; zoomOut.setAttribute('aria-label', '缩小图片'); zoomOut.title = '缩小'
+  zoomOut.appendChild(icon('zoomOut', 16))
+  const zoomIn = el('button', 'ig-act')
+  zoomIn.type = 'button'; zoomIn.id = 'ig-zoom-in'; zoomIn.setAttribute('aria-label', '放大图片'); zoomIn.title = '放大'
+  zoomIn.appendChild(icon('zoomIn', 16))
+  const save = el('button', 'ig-act ig-save')
+  save.type = 'button'; save.id = 'ig-save'; save.setAttribute('aria-label', '保存图片')
+  save.append(icon('download', 15), document.createTextNode('保存'))
+  actions.append(zoomOut, zoomIn, save)
+  bottom.append(cap, actions)
+  ov.append(top, prev, stage, next, bottom)
+  document.body.appendChild(ov)
+
+  close.onclick = closeImageGallery
+  share.onclick = shareGalleryImage
+  prev.onclick = () => moveGallery(-1)
+  next.onclick = () => moveGallery(1)
+  zoomOut.onclick = () => setGalleryZoom(imgView.zoom - 1)
+  zoomIn.onclick = () => setGalleryZoom(imgView.zoom + 1)
+  save.onclick = saveGalleryImage
+  img.addEventListener('dblclick', () => setGalleryZoom(imgView.zoom > 1 ? 1 : 2))
+
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.button !== undefined && e.button !== 0) return
+    if (imgView.zoom > 1) {
+      imgView.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: imgView.panX, panY: imgView.panY }
+      stage.classList.add('is-dragging')
+      try { stage.setPointerCapture(e.pointerId) } catch (err) {}
+    } else {
+      imgView.swipe = { id: e.pointerId, x: e.clientX, y: e.clientY }
+    }
+  })
+  stage.addEventListener('pointermove', (e) => {
+    if (!imgView.drag || imgView.drag.id !== e.pointerId) return
+    imgView.panX = imgView.drag.panX + (e.clientX - imgView.drag.x)
+    imgView.panY = imgView.drag.panY + (e.clientY - imgView.drag.y)
+    applyGalleryZoom()
+  })
+  stage.addEventListener('pointerup', (e) => {
+    if (imgView.drag && imgView.drag.id === e.pointerId) {
+      imgView.drag = null
+      stage.classList.remove('is-dragging')
+      return
+    }
+    if (imgView.swipe && imgView.swipe.id === e.pointerId) {
+      const dx = e.clientX - imgView.swipe.x
+      const dy = e.clientY - imgView.swipe.y
+      imgView.swipe = null
+      if (Math.abs(dx) > 46 && Math.abs(dx) > Math.abs(dy) * 1.2) moveGallery(dx < 0 ? 1 : -1)
+    }
+  })
+  stage.addEventListener('pointercancel', () => {
+    imgView.drag = null
+    imgView.swipe = null
+    stage.classList.remove('is-dragging')
+  })
+  ov.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') return trapGalleryFocus(e)
+    if (e.key === 'ArrowLeft') { e.preventDefault(); moveGallery(-1) }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); moveGallery(1) }
+    else if (e.key === '+' || e.key === '=') { e.preventDefault(); setGalleryZoom(imgView.zoom + 1) }
+    else if (e.key === '-') { e.preventDefault(); setGalleryZoom(imgView.zoom - 1) }
+  })
+  return ov
+}
+
+function currentGalleryImage() {
+  return imgView.images[imgView.index] || null
+}
+
+function setGalleryStatus(text, kind) {
+  const st = $('#ig-status')
+  const stage = $('#ig-stage')
+  if (!st) return
+  st.className = 'ig-status' + (kind ? ' ' + kind : '')
+  st.textContent = ''
+  if (!text) { st.hidden = true; if (stage) stage.classList.remove('is-loading'); return }
+  st.hidden = false
+  if (stage) stage.classList.toggle('is-loading', kind !== 'error')
+  if (kind === 'error') {
+    const copy = el('span', 'ig-status-t', text)
+    const retry = el('button', 'ig-retry', '重试')
+    retry.type = 'button'
+    retry.onclick = (e) => { e.stopPropagation(); loadGalleryImage() }
+    st.append(copy, retry)
+  } else {
+    st.textContent = text
   }
-  ov.textContent = ''
-  const im = el('img')
-  im.src = src; im.alt = '查看图片'
-  ov.appendChild(im)
+}
+
+function applyGalleryZoom() {
+  const img = $('#ig-img')
+  if (!img) return
+  img.style.transform = 'translate3d(' + imgView.panX + 'px, ' + imgView.panY + 'px, 0) scale(' + imgView.zoom + ')'
+  const stage = $('#ig-stage')
+  if (stage) stage.classList.toggle('is-zoomed', imgView.zoom > 1)
+}
+
+function setGalleryZoom(next) {
+  imgView.zoom = Math.max(1, Math.min(3, next || 1))
+  if (imgView.zoom === 1) { imgView.panX = 0; imgView.panY = 0 }
+  applyGalleryZoom()
+}
+
+function loadGalleryImage() {
+  const image = currentGalleryImage()
+  const img = $('#ig-img')
+  if (!image || !img) return
+  const token = ++imgView.token
+  imgView.zoom = 1; imgView.panX = 0; imgView.panY = 0
+  img.classList.remove('is-loaded')
+  img.removeAttribute('src')
+  img.alt = imageName(image, imgView.index)
+  img.style.transform = 'translate3d(0, 0, 0) scale(1)'
+  setGalleryStatus('加载中…')
+  const reveal = (url) => {
+    if (token !== imgView.token) return
+    img.onload = () => {
+      if (token !== imgView.token) return
+      img.classList.add('is-loaded')
+      setGalleryStatus('')
+      if (img.naturalWidth && !image.width) {
+        image.width = img.naturalWidth
+        image.height = img.naturalHeight
+        updateGalleryCaption()
+      }
+    }
+    img.onerror = () => {
+      if (token !== imgView.token) return
+      setGalleryStatus('图片加载失败 · 点按重试', 'error')
+    }
+    img.src = url
+  }
+  if (image.previewUrl || image.src) return reveal(image.previewUrl || image.src)
+  const cached = image.attachmentId && attachCache.get(image.attachmentId)
+  if (cached && cached.url) return reveal(cached.url)
+  attachmentUrl(imgView.s, image)
+    .then((url) => { if (token === imgView.token) reveal(url) })
+    .catch(() => { if (token === imgView.token) setGalleryStatus('图片加载失败 · 点按重试', 'error') })
+}
+
+function updateGalleryCaption() {
+  const image = currentGalleryImage()
+  if (!image) return
+  const name = imageName(image, imgView.index)
+  const elName = $('#ig-caption')
+  const elMeta = $('#ig-meta')
+  if (elName) elName.textContent = name
+  const parts = []
+  if (image.mediaType) parts.push(image.mediaType.replace('image/', '').toUpperCase())
+  if (image.width && image.height) parts.push(image.width + ' × ' + image.height)
+  if (elMeta) elMeta.textContent = parts.join(' · ')
+}
+
+function renderImageViewer() {
+  const image = currentGalleryImage()
+  if (!image) return
+  const total = imgView.images.length
+  const count = $('#ig-count')
+  if (count) count.textContent = (imgView.index + 1) + ' / ' + total
+  const prev = $('#ig-prev'), next = $('#ig-next')
+  if (prev) prev.hidden = total < 2
+  if (next) next.hidden = total < 2
+  updateGalleryCaption()
+  const img = $('#ig-img')
+  if (img) img.alt = imageName(image, imgView.index)
+  loadGalleryImage()
+}
+
+function openImageGallery(s, images, index, opener) {
+  const usable = (images || []).filter((im) => im && (im.previewUrl || im.attachmentId || im.src))
+  if (!usable.length) return
+  imgView.s = s
+  imgView.images = usable
+  imgView.index = Math.max(0, Math.min(index || 0, usable.length - 1))
+  imgView.opener = opener || document.activeElement
+  imgView.open = true
+  imgView.zoom = 1; imgView.panX = 0; imgView.panY = 0
+  ensureImageViewer()
+  renderImageViewer()
   ovSet('img-viewer', true)
+  setTimeout(() => { const c = $('#ig-close'); if (c) c.focus({ preventScroll: true }) }, 30)
+}
+
+function closeImageGallery() {
+  if (!imgView.open) return
+  imgView.open = false
+  imgView.token++
+  imgView.images = []
+  imgView.s = null
+  imgView.zoom = 1; imgView.panX = 0; imgView.panY = 0
+  ovSet('img-viewer', false)
+  const opener = imgView.opener
+  imgView.opener = null
+  if (opener && opener.isConnected) setTimeout(() => { try { opener.focus({ preventScroll: true }) } catch (e) {} }, 0)
+}
+
+function moveGallery(delta) {
+  const total = imgView.images.length
+  if (total < 2) return
+  imgView.index = (imgView.index + delta + total) % total
+  imgView.zoom = 1; imgView.panX = 0; imgView.panY = 0
+  renderImageViewer()
+}
+
+function galleryFileName() {
+  const image = currentGalleryImage()
+  let name = (image && image.name) || 'image'
+  if (!/\.\w+$/.test(name)) {
+    const sub = ((image && image.mediaType) || 'image/png').split('/')[1] || 'png'
+    name += '.' + sub.replace('jpeg', 'jpg')
+  }
+  return name
+}
+
+function galleryLoadedSrc() {
+  const img = $('#ig-img')
+  if (!img || !img.classList.contains('is-loaded')) return ''
+  return img.getAttribute('src') || ''
+}
+
+function saveGalleryImage() {
+  const src = galleryLoadedSrc()
+  if (!src) { toast('图片还在加载', true); return }
+  // Data URL 直接挂 download 在部分 WebKit/Headless 会变成导航而不是下载；
+  // 先转成 Blob URL，再触发下载，页面不会被替换。
+  fetch(src)
+    .then((r) => r.blob())
+    .then((blob) => {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = galleryFileName()
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1500)
+      toast('已开始保存图片')
+    })
+    .catch(() => toast('保存失败，请长按图片使用系统菜单', true))
+}
+
+async function shareGalleryImage() {
+  const src = galleryLoadedSrc()
+  if (!src) { toast('图片还在加载', true); return }
+  try {
+    const blob = await (await fetch(src)).blob()
+    const file = new File([blob], galleryFileName(), { type: blob.type || (currentGalleryImage() && currentGalleryImage().mediaType) || 'image/png' })
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: '图片' })
+      return
+    }
+  } catch (e) {
+    if (/abort/i.test(String((e && e.message) || e))) return
+  }
+  saveGalleryImage()
+}
+
+function trapGalleryFocus(e) {
+  const ov = $('#img-viewer')
+  if (!ov) return
+  const nodes = Array.from(ov.querySelectorAll('button:not([disabled])')).filter((n) => n.offsetParent !== null)
+  if (!nodes.length) return
+  const first = nodes[0], last = nodes[nodes.length - 1]
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
 }
 
 function skeletonNode() {
@@ -1572,16 +1992,7 @@ function itemNodeInner(s, item) {
         }
         if (parsed.body) b.appendChild(el('div', 'qbody', parsed.body))
       } else if (item.text) b.innerHTML = linkifyText(voiceStripHint(item.text))  // 裸 URL 可点；换行由 pre-wrap 保留
-      if (item.images) for (const img of item.images) {
-        if (img.previewUrl) {
-          const im = el('img', 'msg-img')
-          im.src = im.previewUrl
-          im.alt = img.name || '图片'
-          if (img.width && img.height) im.style.aspectRatio = img.width + ' / ' + img.height  // 解码前即占位，杜绝撑开顶人
-          b.appendChild(im)
-        }
-        else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
-      }
+      if (item.images) appendMessageImages(s, b, item.images)
       m.appendChild(b)
       // meta 行：时间 · 复制（右对齐）；失败态在此重试
       const meta = el('div', 'meta-row')
@@ -1617,15 +2028,7 @@ function itemNodeInner(s, item) {
       head.appendChild(el('span', 'peer-time', fmtTime(item.time)))
       const b = el('div', 'bubble')
       if (item.text) b.innerHTML = md(item.text)
-      if (item.images) for (const img of item.images) {
-        if (img.previewUrl) {
-          const im = el('img', 'msg-img')
-          im.src = img.previewUrl
-          im.alt = img.name || '图片'
-          if (img.width && img.height) im.style.aspectRatio = img.width + ' / ' + img.height
-          b.appendChild(im)
-        } else if (img.attachmentId) b.appendChild(attachImgEl(s, img))
-      }
+      if (item.images) appendMessageImages(s, b, item.images)
       m.append(head, b)
       if (item.text) {
         const meta = el('div', 'meta-row')
@@ -8007,7 +8410,12 @@ function buildShell() {
       return
     }
     const im = e.target.closest && e.target.closest('.msg-img')
-    if (im && im.src) openImageViewer(im.src)
+    if (im && im.src) {
+      const meta = im._gallery
+      if (meta) openImageGallery(meta.s, meta.images, meta.index, im)
+      else openImageGallery(null, [{ src: im.src, name: im.alt || '图片' }], 0, im)
+      return
+    }
   })
   // 图片附件
   let pendingImages = []
@@ -9163,7 +9571,7 @@ document.addEventListener('keydown', (e) => {
 })
 setInterval(() => { if (S.connState !== 'online') loadBase() }, 15000)
 /* Esc 关闭最上层浮层（多个开着时关最后打开的那个） */
-const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': () => ovSet('img-viewer', false), 'mode-ov': () => ovSet('mode-ov', false), 'script-ov': () => ovSet('script-ov', false) }
+const OV_CLOSERS = { 'sheet-overlay': closeSheet, 'think-overlay': closeThink, 'task-ov': closeTaskSheet, 'q-ov': closeQSheet, 'sess-ov': closeSessionMenu, 'card-menu': () => closeCardMenu(true), 'quote-ov': () => ovSet('quote-ov', false), 'ts-ov': () => ovSet('ts-ov', false), 'ws-ov': closeNewWsPicker, 'team-ov': closeTeamSheet, 'kids-ov': closeKidsSheet, 'img-viewer': closeImageGallery, 'mode-ov': () => ovSet('mode-ov', false), 'script-ov': () => ovSet('script-ov', false) }
 const ovStack = []
 const ovPush = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1); ovStack.push(id) }
 const ovPop = (id) => { const i = ovStack.indexOf(id); if (i >= 0) ovStack.splice(i, 1) }
