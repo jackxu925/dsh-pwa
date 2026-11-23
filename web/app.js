@@ -2095,26 +2095,30 @@ function focusNote(note) {
   // 兜底：若首次 focus 没生效，下一帧再试（此时已非手势内，只保证光标在位，键盘靠上面那次同步 focus）
   if (document.activeElement !== note) requestAnimationFrame(() => { if (document.activeElement !== note) { try { note.focus({ preventScroll: true }) } catch (e) {} } })
 }
-/* ================= 选区片段引用：框选文字 → 「引用」悬浮钮 =================
-   在消息/工具内容里框选一段文字，浮出「引用」；点它 = quoteNow(sid, label, 选中文本)，
+/* ================= 选区片段引用：框选文字 → 「引用」入口 =================
+   在消息/工具内容里框选一段文字，出现「引用」入口；点它 = quoteNow(sid, label, 选中文本)，
    与每条消息下方常驻的 ❝ 按钮完全同一条路（进引用 chips 条 + 立即弹注解面板），下游不用改。
-   位置：触屏停靠在输入区上沿，鼠标环境仍贴着选区。系统原生菜单（拷贝/查询/翻译/共享）必定
-   出现在选区上下那一小段里，空间不够时还会翻到另一侧；而选区可能停在屏幕任意高度，触屏上
-   贴着选区怎么放都可能被压住（上一版让开 42px 仍不够高）。输入区上沿隔着整段对话内容，
-   菜单两个方向都够不到，引用钮不会再被盖住。
+   位置：触屏用输入区上沿的宽条（图标 + 字数 + 片段预览 + 取消，方案 A）；鼠标环境仍用贴着
+   选区的浮钮。系统原生菜单（拷贝/查询/翻译/共享）必定出现在选区上下那一小段里，空间不够时
+   还会翻到另一侧；触屏上贴着选区怎么放都可能被压住。宽条隔着整段对话内容，菜单两个方向都
+   够不到；预览也让用户确认自己引的是哪一段。
    触屏要点：pointerdown 必须 preventDefault 保住选区，否则 iOS/Android 会先清选区、click 时读不到文字。 */
 const isCoarsePointer = () => matchMedia('(any-pointer: coarse)').matches
 function initQuoteSelection() {
   const host = $('#view-chat')
   const pill = $('#qpill')
+  const bar = $('#qbar')
   const scroller = $('#chat-scroll')
   const composer = $('.composer-wrap')
-  if (!host || !pill || !scroller) return
+  if (!host || !pill || !bar || !scroller) return
   const SELECTABLE = '[data-selectable]'
+  const barCount = $('#qbar-count')
+  const barPrev = $('#qbar-prev')
+  const barX = $('#qbar-x')
   let selTimer = null
   let last = null   // 最近一次通过校验的 {text, label}
 
-  const hide = () => { pill.classList.remove('show') }
+  const hide = () => { pill.classList.remove('show'); bar.classList.remove('show') }
 
   // 读当前选区：必须完整落在同一个 [data-selectable] 元素内（同一气泡，不跨消息）
   function readSelection() {
@@ -2130,43 +2134,55 @@ function initQuoteSelection() {
     return { range, text, box }
   }
 
-  // 触屏设备：系统原生菜单（拷贝/查询/翻译/共享）必定出现在选区上下的一小段里，空间不够时
-  // 还会翻到另一侧；而选区可以停在屏幕任意高度，贴着选区怎么放都可能被压住（让开 42px 也不够）。
-  // 所以触屏一律停靠在输入区上沿——那里离选区隔着整段对话内容，菜单两个方向都够不到。
-  // 鼠标环境没有原生菜单，仍保留贴近选区的浮钮（在输入区前翻到选区上方）。
-  function place(range) {
+  // 鼠标环境：没有系统选择菜单，浮钮贴着选区最顺手（在输入区前翻到选区上方）
+  function placePill(range) {
     const hr = host.getBoundingClientRect()
     const pw = pill.offsetWidth || 90
     const ph = pill.offsetHeight || 34
     const composerTop = composer ? composer.getBoundingClientRect().top - hr.top : hr.height
-    let x, y
-    if (isCoarsePointer()) {
-      y = composerTop - 10 - ph
-      x = hr.width / 2
-    } else {
-      const rects = [].slice.call(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
-      if (!rects.length) return null
-      const first = rects[0]
-      const lastRect = rects[rects.length - 1]
-      x = lastRect.left + lastRect.width / 2 - hr.left
-      y = lastRect.bottom - hr.top + 8
-      if (y + ph > composerTop - 6) y = first.top - hr.top - ph - 8
-    }
+    const rects = [].slice.call(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+    if (!rects.length) return null
+    const first = rects[0]
+    const lastRect = rects[rects.length - 1]
+    let x = lastRect.left + lastRect.width / 2 - hr.left
+    let y = lastRect.bottom - hr.top + 8
+    if (y + ph > composerTop - 6) y = first.top - hr.top - ph - 8
     if (y < 6) return null
     x = Math.max(10 + pw / 2, Math.min(x, hr.width - 10 - pw / 2))
     return { x, y }
+  }
+
+  // 触屏：输入区上沿的宽条（方案 A，用户确认）。系统原生菜单只在选区上下的一小段里，
+  // 这里隔着整段对话内容，两个方向都够不到；条上带字数与片段预览，比小药丸显眼。
+  function placeBar() {
+    const hr = host.getBoundingClientRect()
+    const composerTop = composer ? composer.getBoundingClientRect().top - hr.top : hr.height
+    const y = composerTop - 8 - (bar.offsetHeight || 58)
+    return y < 6 ? null : y
   }
 
   function refresh() {
     if (!host.classList.contains('active')) { hide(); return }
     const ctx = readSelection()
     if (!ctx) { hide(); return }
-    const pos = place(ctx.range)
-    if (!pos) { hide(); return }
-    pill.style.left = Math.round(pos.x) + 'px'
-    pill.style.top = Math.round(pos.y) + 'px'
-    pill.classList.add('show')
     last = { text: ctx.text, label: ctx.box.getAttribute('data-label') || '助手' }
+    if (isCoarsePointer()) {
+      const one = ctx.text.replace(/\s+/g, ' ')
+      barCount.textContent = String(ctx.text.replace(/\s/g, '').length)
+      barPrev.textContent = one.length > 40 ? one.slice(0, 40) + '…' : one
+      const y = placeBar()   // 先填内容再量高度：预览行会让条高一点点
+      if (y == null) { hide(); return }
+      pill.classList.remove('show')
+      bar.style.top = Math.round(y) + 'px'
+      bar.classList.add('show')
+    } else {
+      const pos = placePill(ctx.range)
+      if (!pos) { hide(); return }
+      bar.classList.remove('show')
+      pill.style.left = Math.round(pos.x) + 'px'
+      pill.style.top = Math.round(pos.y) + 'px'
+      pill.classList.add('show')
+    }
   }
 
   // 选区变化：防抖结算（触屏拖句柄会连续触发，只认最后一次）
@@ -2174,14 +2190,19 @@ function initQuoteSelection() {
     clearTimeout(selTimer)
     selTimer = setTimeout(refresh, 70)
   })
-  // 点会话内别处收起（点浮钮本身不收起，否则选不中）
-  document.addEventListener('pointerdown', (e) => { if (!pill.contains(e.target)) hide() }, true)
+  // 点会话内别处收起（点浮钮/引用条本身不收起，否则选不中）
+  document.addEventListener('pointerdown', (e) => { if (!pill.contains(e.target) && !bar.contains(e.target)) hide() }, true)
   scroller.addEventListener('scroll', hide, { passive: true })
   window.addEventListener('resize', hide)
 
-  pill.addEventListener('pointerdown', (e) => e.preventDefault())
-  // 走 onTap：iOS 上系统菜单关闭时合成 click 可能被吞掉；touchend 触发更可靠（AUDIT #56）
-  onTap(pill, () => {
+  const cancel = () => {
+    const sel = window.getSelection()
+    if (sel && sel.removeAllRanges) sel.removeAllRanges()
+    hide()
+    last = null
+  }
+
+  function activate() {
     const ctx = readSelection()
     const text = ctx ? ctx.text : (last && last.text)
     const label = ctx ? (ctx.box.getAttribute('data-label') || '助手') : (last && last.label)
@@ -2191,7 +2212,21 @@ function initQuoteSelection() {
     hide()
     last = null
     quoteNow(S.current, label || '助手', text)   // 复用现有入口：进 chips + 弹注解面板
+  }
+
+  // 浮钮与引用条共用同一个手势入口；pointerdown preventDefault 保住选区。
+  // 走 onTap：iOS 上系统菜单关闭时合成 click 可能被吞掉；touchend 触发更可靠（AUDIT #56）
+  ;[pill, bar].forEach((el) => {
+    el.addEventListener('pointerdown', (e) => e.preventDefault())
+    onTap(el, activate)
   })
+
+  // 取消：先阻止冒泡，避免同一次点按又触发 activate
+  if (barX) {
+    barX.addEventListener('click', (e) => e.stopPropagation())
+    barX.addEventListener('touchend', (e) => e.stopPropagation())
+    onTap(barX, cancel)
+  }
 }
 /* 条目的稳定标识：翻页（loadEarlier）后要按它把视口锚回原位。
    用事件自带的 id，不用下标（前面插入旧消息后下标会整体位移）。 */
@@ -8269,6 +8304,11 @@ function buildShell() {
     <div class="goal-bar" id="goal-bar" role="button" tabindex="0" aria-label="目标" style="display:none"></div>
     <div class="chat-scroll" id="chat-scroll"></div>
     <button class="qpill" id="qpill" type="button" aria-label="引用选中的文字"><span class="qp-ic" data-ic="quote"></span><span class="qp-tx">引用</span></button>
+    <button class="qbar" id="qbar" type="button" aria-label="引用选中的文字">
+      <span class="qb-ic" data-ic="quote"></span>
+      <span class="qb-tx"><b>引用所选 · <i id="qbar-count">0</i> 字</b><small id="qbar-prev"></small></span>
+      <span class="qb-x" id="qbar-x" role="button" aria-label="取消引用">✕</span>
+    </button>
     <button class="q-handle" id="q-handle" type="button" aria-label="问过的问题" aria-expanded="false"><span class="qh-ic" data-ic="qlist"></span></button>
     <div class="q-scrim" id="q-scrim"></div>
     <div class="q-drawer" id="q-drawer" role="dialog" aria-label="问过的问题" aria-hidden="true">
