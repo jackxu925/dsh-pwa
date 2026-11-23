@@ -1148,7 +1148,7 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
 .qt-chip .nd { flex:none; width:6px; height:6px; border-radius:50%; background:var(--orange); }
 .qt-chip .rm { flex:none; border:none; background:none; color:var(--text-3); font-size:13px; padding:2px 3px; cursor:pointer; min-width:20px; min-height:20px; }
 .qt-chip .rm:active { color:var(--red); }
-/* 选区片段引用：悬浮「引用」按钮（触屏停靠输入区上沿；鼠标环境贴着选区） */
+/* 选区片段引用：鼠标环境的浮钮（贴着选区；触屏由 .qbar 宽条接管） */
 .qpill {
   position:absolute; z-index:30; left:0; top:0;
   display:inline-flex; align-items:center; gap:6px;
@@ -1168,6 +1168,31 @@ html.light .stat-pill { background:rgba(15,23,42,.04); }
 .qpill .qp-tx { white-space:nowrap; }
 html.light .qpill { background:#eef4ff; color:#0b1a33; border-color:rgba(37,99,235,.4); box-shadow:0 10px 26px -6px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.16); }
 html.light .qpill:active { background:#dfe9fd; }
+/* 触屏：输入区上沿的选区引用条（方案 A：图标 + 字数 + 片段预览 + 取消） */
+.qbar {
+  position:absolute; z-index:30; top:0; left:50%;
+  width:min(760px, calc(100% - 20px));
+  display:flex; align-items:center; gap:11px;
+  padding:9px 11px; border-radius:16px;
+  border:1px solid rgba(59,130,246,.55);
+  background:linear-gradient(180deg, rgba(59,130,246,.21), rgba(59,130,246,.10)), var(--bg-card);
+  color:var(--text); text-align:left; font-family:var(--font);
+  box-shadow:0 16px 34px -14px rgba(0,0,0,.8), 0 0 0 1px rgba(59,130,246,.08) inset;
+  opacity:0; visibility:hidden; pointer-events:none;
+  transform:translate(-50%,6px) scale(.985);
+  transition:opacity .16s var(--ease-out), transform .16s var(--ease-out);
+}
+.qbar.show { opacity:1; visibility:visible; pointer-events:auto; transform:translate(-50%,0) scale(1); }
+.qbar:active { background:linear-gradient(180deg, rgba(59,130,246,.26), rgba(59,130,246,.14)), var(--bg-card); }
+.qbar .qb-ic { width:34px; height:34px; flex:none; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; background:linear-gradient(160deg,#4f8ff7,#2563eb); box-shadow:0 6px 16px -4px rgba(37,99,235,.65); }
+.qbar .qb-ic svg { width:17px; height:17px; display:block; }
+.qbar .qb-tx { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.qbar .qb-tx b { font-size:13px; font-weight:700; letter-spacing:.01em; }
+.qbar .qb-tx b i { font-style:normal; color:var(--info); font-variant-numeric:tabular-nums; }
+.qbar .qb-tx small { font-size:11.5px; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.qbar .qb-x { flex:none; width:30px; height:30px; display:flex; align-items:center; justify-content:center; border-radius:9px; color:var(--text-3); font-size:13px; }
+.qbar .qb-x:active { background:var(--bg-card-2); }
+html.light .qbar { background:linear-gradient(180deg, rgba(59,130,246,.10), rgba(59,130,246,.04)), #fff; box-shadow:0 16px 34px -18px rgba(15,23,42,.35); }
 /* 注解面板 */
 .quote-full { flex:none; margin:4px 16px 0; background:var(--bg-card); border:.5px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:9px 12px; font-size:12px; line-height:1.55; color:var(--text-2); max-height:16vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--font); }
 .note-in { flex:1; margin:10px 16px 0; background:var(--bg-card); border:1px solid rgba(59,130,246,.4); border-radius:14px; padding:13px 14px; font-size:15px; line-height:1.6; color:var(--text); min-height:96px; overflow-y:auto; outline:none; white-space:pre-wrap; overflow-wrap:break-word; -webkit-user-modify:read-write-plaintext-only; transition:border-color .2s; }
