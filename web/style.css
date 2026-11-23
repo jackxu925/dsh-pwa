@@ -155,12 +155,11 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 
 /* 时间视图卡片上的工作区标注 */
 .session-card .s-ws {
-  margin-left:auto; flex:none; max-width: 46%;
+  flex:0 1 auto; min-width:0; max-width: 46%;
   font-size:11.5px; color:var(--text-3);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   padding:2px 8px; border-radius:8px; background: rgba(255,255,255,.06);
 }
-.session-card .s-ws + .s-meta { margin-left:0; }
 
 .session-card {
   margin: 0 12px 10px; padding: 12px 8px 12px 16px;
@@ -364,8 +363,11 @@ html.light .ext-chip.c-md { color:#2563eb; }
 @media (prefers-reduced-motion: reduce) {
   .sr-skel, .sr-dots b { animation:none; }
 }
-.session-card .row3 { display:flex; align-items:center; gap:8px; }
-.s-meta { margin-left:auto; font-size:12px; color:var(--text-3); flex:none; }
+/* 底部 meta 行统一靠右：状态徽标、预设、工作区 chip 与右上角时间同一条右边缘 */
+.session-card .row3 { display:flex; align-items:center; gap:8px; justify-content:flex-end; }
+/* 徽标不允许被压成两行：窄屏留给工作区 chip 收缩省略 */
+.session-card .row3 > .badge { flex:none; white-space:nowrap; }
+.s-meta { font-size:12px; color:var(--text-3); flex:none; }
 
 /* 按工作区视图：第一级只显示工作区行（点按下钻看会话） */
 .ws-row {
