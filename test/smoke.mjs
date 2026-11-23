@@ -60,3 +60,6 @@ await import('./voice.mjs')
 
 // Same pattern for the phone's CJK-safe content index and its search route.
 await import('./search.mjs')
+
+// Connection diagnostics: route, dedupe/limits/rotation, upgrade watch.
+await import('./diag.mjs')

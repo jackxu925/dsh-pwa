@@ -97,6 +97,7 @@ Upgrade later with `npm update dsh-pwa` and a `dsh web` restart. The plugin moun
 - The server does exactly one thing: mount `web/` as static files at `/m` (`lib/routes.js`, self-healing if the webServer instance is recreated).
 - The page talks directly to DSH's own `/api` — the identical protocol the desktop GUI uses (`POST /api/<ns>/<method>`, `POST /api/respond`, `ws://…/api/events.mux` downstream frames). Zero business-logic duplication.
 - Tailscale works out of the box because it reuses the existing `trusted-host` fence.
+- Connection diagnostics: the page batches transport metadata (WebSocket close code/reason, lifetime, visibility, network type, reconnect count) to `/api/pwa.diag`; the plugin appends NDJSON to `$DSH_HOME/state/dsh-pwa-diag.ndjson` and records `/api/remote.mux` upgrades/closes. Transport metadata only — no message text. Delete the file to clear it.
 
 Iterating on the UI needs no restart: files are re-read per request, just refresh the page.
 
