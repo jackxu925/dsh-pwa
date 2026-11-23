@@ -2596,6 +2596,9 @@ function pinGroup() {
 }
 function savePinned() { try { localStorage.setItem('dshm-pinned', JSON.stringify([...S.pinned])) } catch (e) {} }
 function renderList() {
+  // 卡片内联改名期间冻结重绘：后台投影/流式帧的 300ms 列表刷新会换掉正在输入的 DOM，
+  // 中文输入法组字被打断、未提交的草稿也会丢。改名结束（保存/取消）后统一重绘。
+  if (inlineRename) return
   closeCardMenu(false)
   const wrap = $('#session-list')
   if (!wrap) return
@@ -3550,8 +3553,13 @@ function sessionCard(s, showWs) {
   card.append(main, dots)
   card.dataset.sid = s.id
   const open = () => { location.hash = '#/s/' + s.id }
-  card.onclick = () => { if (cardMenuState.sid) { closeCardMenu(false); return } open() }
+  card.onclick = () => {
+    if (card.classList.contains('renaming')) return   // 编辑标题时不触发「打开会话」
+    if (cardMenuState.sid) { closeCardMenu(false); return }
+    open()
+  }
   card.onkeydown = (e) => {
+    if (card.classList.contains('renaming')) return
     if (e.target && e.target.closest && e.target.closest('.s-dots')) return
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() }
   }
@@ -3559,6 +3567,10 @@ function sessionCard(s, showWs) {
 }
 /* 会话卡右侧 ⋯ 菜单：常驻入口，点开竖向菜单（替代左滑手势）。 */
 const cardMenuState = { sid: null, btn: null }
+/* 卡片内联改名：⋯ → 改名直接在卡片标题行里编辑，不再打开二级操作单。
+   inlineRename 存在期间 renderList() 冻结——流式帧/投影 300ms 一次的列表重绘
+   会把正在输入的 DOM 换掉，中文输入法的组字会被打断、草稿也会丢。 */
+let inlineRename = null
 function togglePinned(s) {
   const on = !S.pinned.has(s.id)
   if (on) S.pinned.add(s.id)
@@ -3611,6 +3623,115 @@ function positionCardMenu(btn) {
   menu.style.left = Math.round(left) + 'px'
   menu.style.top = Math.round(top) + 'px'
 }
+function findSessionCard(sid) {
+  for (const node of document.querySelectorAll('.session-card')) {
+    if (node.dataset.sid === sid) return node
+  }
+  return null
+}
+function beginCardRename(s, card) {
+  if (!s || !card) return
+  if (inlineRename) endCardRename()
+  const main = card.querySelector('.s-main')
+  if (!main) return
+  const row = el('div', 's-rename-row')
+  const input = el('input', 's-rename-input')
+  input.type = 'text'
+  input.value = s.title || ''
+  input.placeholder = '会话标题'
+  input.setAttribute('aria-label', '会话标题')
+  input.setAttribute('enterkeyhint', 'done')
+  input.autocomplete = 'off'
+  input.spellcheck = false
+  const save = el('button', 's-rename-btn s-rename-ok')
+  save.type = 'button'
+  save.setAttribute('aria-label', '保存标题')
+  save.appendChild(icon('check', 18))
+  const cancel = el('button', 's-rename-btn s-rename-cancel')
+  cancel.type = 'button'
+  cancel.setAttribute('aria-label', '取消改名')
+  cancel.appendChild(icon('close', 18))
+  row.append(input, save, cancel)
+  main.prepend(row)
+  card.classList.add('renaming')
+  // 卡片本体是 role=button；编辑态里放了输入框和按钮，改成 group 让读屏能进到控件，
+  // 并按原值在结束时还原。
+  const prevRole = card.getAttribute('role')
+  const prevTab = card.getAttribute('tabindex')
+  card.setAttribute('role', 'group')
+  card.removeAttribute('tabindex')
+  const st = { sid: s.id, card, row, input, save, cancel, saving: false, prevRole, prevTab }
+  inlineRename = st
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return   // 中文输入法组字中的 Enter/Escape 不当作保存/取消
+    if (e.key === 'Enter') { e.preventDefault(); saveCardRename() }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelCardRename(true) }
+  })
+  // 键盘开着时点输入框旁的按钮，iOS 会先收键盘导致合成 click 丢位——用项目里的 onTap 走 touchend。
+  onTap(save, () => saveCardRename())
+  onTap(cancel, () => cancelCardRename(true))
+  // iOS 只在手势任务内同步 focus 才会弹出键盘；这一步必须留在 ⋯ 菜单点击的同一拍里。
+  // 键盘弹起后通常会把聚焦的输入框滚进可视区，下一帧只兜底列表位置，不抢焦点。
+  input.focus({ preventScroll: true })
+  input.select()
+  requestAnimationFrame(() => {
+    if (inlineRename !== st) return
+    const r = input.getBoundingClientRect()
+    if (r.top < 0 || r.bottom > window.innerHeight) input.scrollIntoView({ block: 'center' })
+  })
+}
+function endCardRename() {
+  const st = inlineRename
+  if (!st) return null
+  inlineRename = null
+  try { st.input.blur() } catch (e) {}
+  if (st.row && st.row.parentNode) st.row.remove()
+  if (st.card) {
+    st.card.classList.remove('renaming')
+    if (st.prevRole === null) st.card.removeAttribute('role')
+    else st.card.setAttribute('role', st.prevRole)
+    if (st.prevTab === null) st.card.removeAttribute('tabindex')
+    else st.card.setAttribute('tabindex', st.prevTab)
+  }
+  return st
+}
+function cancelCardRename(refocus) {
+  const st = endCardRename()
+  if (!st) return
+  if (refocus && st.card && st.card.isConnected) st.card.focus({ preventScroll: true })
+}
+async function saveCardRename() {
+  const st = inlineRename
+  if (!st || st.saving) return
+  const s = sess(st.sid)
+  if (!s) { cancelCardRename(false); return }
+  const t = st.input.value.replace(/\s+/g, ' ').trim()
+  if (!t) { toast('标题不能为空', true); st.input.focus(); return }
+  st.saving = true
+  st.save.disabled = true
+  st.cancel.disabled = true
+  st.input.readOnly = true
+  vibrate(8)
+  try {
+    const v = await rpc('session/rename', { request: { sessionId: s.id, title: t } })
+    const title = v && typeof v.title === 'string' && v.title ? v.title : t
+    s.title = title
+    s._titleAt = Date.now()   // 改名后短窗内本地胜出：在途旧 title 投影/列表响应不得把它改回去
+    if (inlineRename === st) endCardRename()
+    renderList()
+    toast('已重命名 ✓')
+  } catch (e) {
+    if (inlineRename === st) {
+      st.saving = false
+      st.save.disabled = false
+      st.cancel.disabled = false
+      st.input.readOnly = false
+      st.input.focus()
+      try { st.input.setSelectionRange(st.input.value.length, st.input.value.length) } catch (e2) {}
+    }
+    toast('重命名失败：' + e.message, true)
+  }
+}
 function openCardMenu(s, btn, focusFirst) {
   closeCardMenu(false)
   const menu = $('#card-menu'), catcher = $('#card-menu-catcher')
@@ -3635,6 +3756,7 @@ async function doCardMenuAction(act) {
   const sid = cardMenuState.sid
   if (!sid) return
   const s = sess(sid)
+  const card = findSessionCard(sid)
   closeCardMenu(false)
   if (!s) return
   vibrate(8)
@@ -3644,7 +3766,7 @@ async function doCardMenuAction(act) {
     toast(on ? '已置顶' : '已取消置顶')
     return
   }
-  if (act === 'rename') { openSessionMenu(s.id, 0, 0, true); return }
+  if (act === 'rename') { beginCardRename(s, card); return }
   if (act === 'fork') {
     try { toast('正在分叉…'); const v = await rpc('session/fork', { request: { sessionId: s.id } }); toast('已分叉 ✓'); location.hash = '#/s/' + v.sessionId; flushForkTail(v.sessionId) } catch (e) { toast('分叉失败：' + e.message, true) }
     return
@@ -3658,6 +3780,12 @@ async function doCardMenuAction(act) {
   }
 }
 window.addEventListener('resize', () => closeCardMenu(false))
+/* 内联改名：点卡片外的任何地方先收掉编辑（只还原 DOM，不整表重绘，免得把正要点的目标挪走）。 */
+document.addEventListener('pointerdown', (e) => {
+  if (!inlineRename || inlineRename.saving) return   // 保存请求在途时先别收编辑框，失败还能原地重试
+  if (e.target && e.target.closest && e.target.closest('.session-card.renaming')) return
+  cancelCardRename(false)
+}, true)
 /* 长按会话卡 → 操作单（重命名 / 分叉 / 归档 / 停止），对齐桌面能力 */
 let sessMenuTimer = null
 function initSessionLongPress(sc) {
@@ -3672,6 +3800,7 @@ function initSessionLongPress(sc) {
   })
 }
 function openSessionMenu(sid, x, y, expandRename) {
+  if (inlineRename) cancelCardRename(false)
   const s = sess(sid)
   if (!s) return
   const ov = $('#sess-ov'), sheet = $('#sess-sheet')
@@ -6618,6 +6747,7 @@ function showProto() {
 function closeProto() { if (protoView) { protoView.remove(); protoView = null } }
 
 function route() {
+  if (inlineRename) cancelCardRename(false)   // 离开列表前先收掉内联改名，别让编辑框跟着页面藏起来
   const h = location.hash || '#/'
   closeComposerExpand({ animate: false, focus: 'none' })
   ttsStop()   // 切走就别念了
