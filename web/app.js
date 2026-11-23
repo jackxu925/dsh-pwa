@@ -249,27 +249,159 @@ function md(src) {
   return html
 }
 
+/* ================= 连接诊断（WS 断开为什么没有日志） ================= */
+/* 手机端断线一直没有可查的记录：这里只记传输层元数据——close code/原因/在线时长/
+   前后台/网络类型/重连次数，不记消息内容、会话 id、cookie 或 token。事件先进
+   localStorage 环形缓冲，上报失败就留到回前台/联网/下次启动再发；服务端写到
+   $DSH_HOME/state/dsh-pwa-diag.ndjson（按 event.id 去重，4 MiB 轮转）。 */
+const DIAG_PATH = '/api/pwa.diag'
+const DIAG_KEY = 'dshm-diag'
+const DIAG_MAX = 200
+const DIAG_BATCH = 25
+const DIAG_APP = (() => {
+  try {
+    const src = document.currentScript && document.currentScript.src
+    const m = src && /[?&]v=([\w.-]+)/.exec(src)
+    return m ? m[1] : '1.22.0'
+  } catch (e) { return '1.22.0' }
+})()
+const Diag = {
+  sid: (() => {
+    try { return crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2) } catch (e) { return String(Date.now()) }
+  })(),
+  seq: 0,
+  events: [],
+  timer: null,
+  flushing: false,
+  failures: 0,
+  rpcSeen: new Map(),
+  load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(DIAG_KEY) || '[]')
+      if (Array.isArray(saved)) this.events = saved.filter((e) => e && typeof e === 'object').slice(-DIAG_MAX)
+    } catch (e) { /* private mode / corrupt value */ }
+  },
+  save() {
+    try { localStorage.setItem(DIAG_KEY, JSON.stringify(this.events.slice(-DIAG_MAX))) } catch (e) { /* quota / private mode */ }
+  },
+  net() {
+    const out = { on: navigator.onLine ? 1 : 0 }
+    const c = navigator.connection
+    if (c) {
+      if (c.effectiveType) out.et = c.effectiveType
+      if (c.type) out.ct = c.type
+      if (typeof c.rtt === 'number') out.rtt = c.rtt
+    }
+    return out
+  },
+  record(kind, fields) {
+    const ev = { id: this.sid + ':' + (++this.seq), t: Date.now(), kind, vis: document.visibilityState || '', ...this.net(), ...(fields || {}) }
+    this.events.push(ev)
+    if (this.events.length > DIAG_MAX) this.events.splice(0, this.events.length - DIAG_MAX)
+    this.save()
+    this.schedule()
+    return ev
+  },
+  /* rpc 失败节流：同一端点 8s 内只记一条，避免断网轮询把缓冲刷满 */
+  recordRpcError(endpoint, error) {
+    const key = String(endpoint)
+    const now = Date.now()
+    if (now - (this.rpcSeen.get(key) || 0) < 8000) return
+    this.rpcSeen.set(key, now)
+    this.record('rpc_error', { ep: key.slice(0, 80), msg: String((error && error.message) || error).slice(0, 200) })
+  },
+  schedule() {
+    if (this.timer) return
+    const delay = this.failures ? Math.min(2000 * Math.pow(2, this.failures - 1), 60000) : 900
+    this.timer = setTimeout(() => { this.timer = null; this.flush() }, delay)
+  },
+  async flush() {
+    if (this.flushing || this.events.length === 0 || !navigator.onLine) return
+    this.flushing = true
+    const batch = this.events.slice(0, DIAG_BATCH)
+    try {
+      const opts = {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ events: batch }),
+        credentials: 'same-origin',
+        cache: 'no-store',
+        keepalive: true,
+      }
+      if (AbortSignal.timeout) opts.signal = AbortSignal.timeout(5000)
+      const r = await fetch(DIAG_PATH, opts)
+      if (r.status === 204) {
+        const ids = new Set(batch.map((ev) => ev.id))
+        this.events = this.events.filter((ev) => !ids.has(ev.id))
+        this.failures = 0
+        this.save()
+      } else {
+        this.failures++
+      }
+    } catch (e) {
+      this.failures++
+    }
+    this.flushing = false
+    if (this.events.length) this.schedule()
+  },
+  /* 页面隐藏/卸载时用 beacon 兜底；beacon 没有回执，所以事件留在缓冲里，
+     下次启动重发，服务端按 event.id 去重，不会重复写。 */
+  flushOnHide() {
+    if (this.events.length === 0) return
+    try {
+      if (navigator.sendBeacon) {
+        const body = JSON.stringify({ events: this.events.slice(0, DIAG_BATCH) })
+        if (navigator.sendBeacon(DIAG_PATH, new Blob([body], { type: 'application/json' }))) return
+      }
+    } catch (e) { /* fall through to fetch */ }
+    this.flush()
+  },
+  boot() {
+    this.load()
+    this.record('boot', { app: DIAG_APP })
+    this.flush()
+    window.addEventListener('online', () => { this.failures = 0; this.record('net', { online: 1 }); this.flush() })
+    window.addEventListener('offline', () => this.record('net', { online: 0 }))
+    document.addEventListener('visibilitychange', () => {
+      const state = document.visibilityState
+      this.record('vis', { state })
+      if (state === 'hidden') this.flushOnHide()
+      else { this.failures = 0; this.flush() }
+    })
+    window.addEventListener('pagehide', (e) => { this.record('pagehide', { persisted: e.persisted ? 1 : 0 }); this.flushOnHide() })
+    window.addEventListener('pageshow', (e) => { this.record('pageshow', { persisted: e.persisted ? 1 : 0 }); this.failures = 0; this.flush() })
+    document.addEventListener('freeze', () => this.record('freeze'))
+    document.addEventListener('resume', () => { this.record('resume'); this.failures = 0; this.flush() })
+  },
+}
+Diag.boot()
+
 /* ================= API 层 ================= */
 /* 一元 RPC：POST /api/<ns>/<method>，payload 必须恰为 {args:{…}}（wire 名
  * _request / request / 或 commands 的扁平字段），method 必须与端点一致。 */
 async function rpc(endpoint, args, rpcId, timeoutMs) {
-  const r = await fetch('/api/' + endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method: endpoint, payload: { args: args || {} } }),
-    // Tailscale 抖动时挂起的请求会让气泡永远停在「发送中」：20s 超时落地成失败态（可点重试）
-    signal: AbortSignal.timeout(timeoutMs || 20000),
-  })
-  if (!r.ok) {
-    if (r.status === 401) markAuthExpired()
-    throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期）' : r.status === 403 ? '（主机不在信任名单）' : ''))
+  try {
+    const r = await fetch('/api/' + endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: rpcId || uuid(), method: endpoint, payload: { args: args || {} } }),
+      // Tailscale 抖动时挂起的请求会让气泡永远停在「发送中」：20s 超时落地成失败态（可点重试）
+      signal: AbortSignal.timeout(timeoutMs || 20000),
+    })
+    if (!r.ok) {
+      if (r.status === 401) markAuthExpired()
+      throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期）' : r.status === 403 ? '（主机不在信任名单）' : ''))
+    }
+    const full = await r.json()
+    if (!full.result || !full.result.ok) {
+      const err = full.result && full.result.error
+      throw new Error((err && err.message) || (endpoint + ' failed'))
+    }
+    return full.result.value
+  } catch (e) {
+    Diag.recordRpcError(endpoint, e)
+    throw e
   }
-  const full = await r.json()
-  if (!full.result || !full.result.ok) {
-    const err = full.result && full.result.error
-    throw new Error((err && err.message) || (endpoint + ' failed'))
-  }
-  return full.result.value
 }
 /* $events waterfall 应答：审批/提问的决定通过一元 $events/result 回传。
  * outcome: {kind:'result',value} | {kind:'rejected',error:{name,message}} | {kind:'next'} */
@@ -4345,7 +4477,7 @@ async function loadBase() {
     if (!S.workspaces.length) deriveWorkspaces()
     seenBootstrap()   // 列表首次落地后：现有会话一次性全部记为已读（此后新完成的才标未读）
     S.listLoaded = true
-    setConn('online')
+    setConn('online', 'list_ok')
     renderList()
     scheduleRunningPreviews(900)
     // 冷启动直接开子会话/团队会话时，父目录与成员名可能比会话本身晚落地：补刷一次标题/谱系
@@ -4355,7 +4487,7 @@ async function loadBase() {
       refreshChatChrome(cur)
     }
   } catch (e) {
-    setConn('offline')
+    setConn('offline', 'list_error', { msg: String((e && e.message) || e).slice(0, 160) })
     toast('连接失败：' + e.message, true)
   }
 }
@@ -4647,8 +4779,12 @@ function renderOfflineStrip() {
   btn.onclick = () => { vibrate(8); manualReconnect() }
   strip.appendChild(btn)
 }
-function setConn(state) {
+function setConn(state, reason, extra) {
+  const prev = S.connState
   S.connState = state
+  // 只有状态真正变化才记一条，避免 15s 轮询/每次 loadBase 重复写日志。
+  // reason 区分 WS 断开与列表 RPC 失败——两者都会显示「连接已断开」。
+  if (prev !== state) Diag.record('conn', { state, why: reason || '', ...(extra || {}) })
   renderOfflineStrip()
   const pill = $('#conn-pill')
   if (pill) {
@@ -4664,6 +4800,9 @@ function setConn(state) {
  *   $events         — api-session/* 通知 + 审批/提问 waterfall（首帧 ready 带 clientId） */
 const Mux = {
   ws: null, retry: 0, timer: null, closed: false, everConnected: false,
+  gen: 0,                // 每次物理连接 +1，用来把 close 与对应的 open 对上
+  _lastConnectAt: 0,
+  _lastErrorAt: 0,
   streams: new Map(),   // streamId → {kind, sessionId?}
   followId: null,       // 当前 follow 的 sessionId
   handlers: {},         // kind → (value, meta) => void
@@ -4672,9 +4811,17 @@ const Mux = {
     const url = new URL('/api/remote.mux', location.origin)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(url)
+    const gen = ++this.gen
+    const startedAt = Date.now()
     this.ws = ws
     S.es.mux = ws
+    // 断网重连可能每 5s 一次：connect 只在首连/超过 10s 时记，close 才是关键证据
+    if (this.retry === 0 || startedAt - this._lastConnectAt > 10000) {
+      this._lastConnectAt = startedAt
+      Diag.record('ws_connect', { gen, attempt: this.retry })
+    }
     ws.addEventListener('open', () => {
+      Diag.record('ws_open', { gen, dur: Date.now() - startedAt })
       this.retry = 0
       // 重连后的审批/提问：清空旧条目（旧 clientId 上的投递已死），但宿主会把未决
       // waterfall 重放给新连接——所以先记账，留 2.5s 重放窗口，只对「没回来」的条目
@@ -4723,10 +4870,12 @@ const Mux = {
         if (h) { try { h(m.value, meta) } catch (e) { console.error('mux handler', e) } }
       } else if (m.type === 'error') {
         this.streams.delete(m.streamId)
+        const code = (m.error && m.error.code) || ''
+        Diag.record('stream_error', { stream: meta.kind || '', code: String(code).slice(0, 40) })
         if (meta.kind === 'follow' && meta.sessionId) {
+          // follow 流被宿主拒绝（如地址错误）：立刻结束「加载中」并给出可见的可重试错误态
           const msg = (m.error && m.error.message) || '会话流错误'
           const fs2 = sess(meta.sessionId)
-          // follow 流被宿主拒绝（如地址错误）：立刻结束「加载中」并给出可见的可重试错误态
           if (fs2._rejectLoad) fs2._rejectLoad(new Error(msg))
           if (S.current === meta.sessionId) toast('会话流错误：' + msg, true)
         }
@@ -4734,11 +4883,28 @@ const Mux = {
         this.streams.delete(m.streamId)
       }
     })
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
+      const closedAt = Date.now()
+      Diag.record('ws_close', {
+        gen,
+        code: ev.code,
+        reason: String(ev.reason || '').slice(0, 120),
+        clean: ev.wasClean ? 1 : 0,
+        dur: closedAt - startedAt,
+        retry: this.retry,
+        stale: this.ws === ws ? 0 : 1,
+      })
       if (this.closed) return
-      setConn('offline')
+      setConn('offline', 'ws_close')
       this.retry = Math.min(this.retry + 1, 5)
       this.timer = setTimeout(() => this.connect(), 1000 * this.retry)
+    })
+    // error 不提供细节，且通常紧跟着 close；只用来区分「close 前是否报过错」
+    ws.addEventListener('error', () => {
+      const now = Date.now()
+      if (now - this._lastErrorAt < 10000) return
+      this._lastErrorAt = now
+      Diag.record('ws_error', { gen })
     })
   },
   open(kind, endpoint, args, extra) {
@@ -4865,7 +5031,7 @@ function applyProjectionFrame(v) {
 Mux.handlers.events = (v) => {
   if (v.type === 'ready') {
     S.wfClient = v.clientId
-    setConn('online')
+    setConn('online', 'events_ready')
     loadBase()
     if (S.current) reloadCurrent()
     return
@@ -9697,5 +9863,5 @@ document.addEventListener('keydown', (e) => {
 })
 /* 调试/端到端验证钩子：真实验证需要触达闭包内部（如主动断开 WS 走真实重连路径）。
    页面脚本本就同源同权，不构成新的暴露面。 */
-try { window.__dsh = { S, Mux, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat, VOICE, voiceSpeak, readSpeak, modeOf, modeSet, applyMode, voiceSetMode, vTranscribeAndSend, vSubmitRecording, vFetchPara } } catch (e) {}
+try { window.__dsh = { S, Mux, Diag, sess, renderChat, chatScrollEl, nearBottom, openTeamSheet, openKidsSheet, openChildChat, VOICE, voiceSpeak, readSpeak, modeOf, modeSet, applyMode, voiceSetMode, vTranscribeAndSend, vSubmitRecording, vFetchPara } } catch (e) {}
 })()

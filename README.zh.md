@@ -98,6 +98,7 @@ dsh --profile web --host 0.0.0.0 --port 3080 --trusted-host <你的访问域名>
 - 服务端只做一件事：把 `web/` 下的静态页面挂到 `/m`（`lib/routes.js`，自愈式挂载）。
 - 页面直接调用 DSH 自己的 `/api` —— 和桌面 GUI 完全相同的协议（`POST /api/<ns>/<method>`、`POST /api/respond`、`ws://…/api/events.mux` 下行帧）。零业务逻辑重复。
 - 天然支持 Tailscale：沿用现有的 `trusted-host` 信任围栏。
+- 连接诊断：页面把传输层元数据（WebSocket close code/原因、在线时长、前后台、网络类型、重连次数）批量上报到 `/api/pwa.diag`；插件把 NDJSON 写到 `$DSH_HOME/state/dsh-pwa-diag.ndjson`，同时记录 `/api/remote.mux` 的连接建立/关闭。只记传输元数据，不记消息内容；删掉该文件即可清空。
 
 改 `web/` 下任何文件后刷新页面即可（静态文件按请求读取，无需重启）。
 
