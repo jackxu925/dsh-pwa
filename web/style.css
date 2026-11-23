@@ -162,16 +162,20 @@ button, .session-card, .tool-head, .sheet-row, .tab, .pick-ws, .ask-opt, .chip, 
 }
 
 .session-card {
+  /* ⋯ 脱离文档流坐在右侧竖列里（时间 / ⋯ / 工作区 chip 共用同一条右边缘）；
+     短卡给这条右列留出竖向空间，避免时间和 chip 落到圆点底下 */
+  position:relative; min-height:104px;
   margin: 0 12px 10px; padding: 12px 8px 12px 16px;
   background: var(--bg-card); border-radius: 18px;
   border: .5px solid var(--line);
   display:flex; flex-direction:row; align-items:center; gap:2px;
   cursor:pointer;
 }
-.s-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:7px; }
+.s-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:7px; align-self:stretch; padding-right:46px; }
 /* 右侧常驻操作入口：44px 热区 + 30px 可见圆点，一眼知道能点 */
 .s-dots {
-  flex:none; width:44px; height:44px; border:0; border-radius:50%; background:transparent;
+  position:absolute; right:8px; top:50%; transform:translateY(-50%);
+  width:44px; height:44px; border:0; border-radius:50%; background:transparent;
   padding:0; display:flex; align-items:center; justify-content:center;
   color:var(--text-2); cursor:pointer;
 }
@@ -316,7 +320,10 @@ html.light .ext-chip.c-md { color:#2563eb; }
 .ws-chg-btn:disabled { opacity:.55; }
 .session-card .row1 { display:flex; align-items:center; gap:8px; }
 .session-card .s-title { font-size:16px; font-weight:600; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.session-card .s-time { font-size:12px; color:var(--text-3); flex:none; font-variant-numeric: tabular-nums; }
+.session-card .s-time {
+  flex:none; margin-right:-39px;
+  font-size:12px; color:var(--text-3); font-variant-numeric: tabular-nums;
+}
 .session-card .s-preview {
   font-size:14px; color:var(--text-2); line-height:1.4;
   overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
@@ -364,7 +371,7 @@ html.light .ext-chip.c-md { color:#2563eb; }
   .sr-skel, .sr-dots b { animation:none; }
 }
 /* 底部 meta 行统一靠右：状态徽标、预设、工作区 chip 与右上角时间同一条右边缘 */
-.session-card .row3 { display:flex; align-items:center; gap:8px; justify-content:flex-end; }
+.session-card .row3 { display:flex; align-items:center; gap:8px; justify-content:flex-end; margin-right:-39px; margin-top:auto; }
 /* 徽标不允许被压成两行：窄屏留给工作区 chip 收缩省略 */
 .session-card .row3 > .badge { flex:none; white-space:nowrap; }
 .s-meta { font-size:12px; color:var(--text-3); flex:none; }
