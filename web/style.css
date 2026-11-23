@@ -2174,3 +2174,32 @@ html.light .voice-view[data-state=thinking] .v-word { color: #9a4a06; }
 
 /* 语音模式构建标记：确认手机跑的是哪一版（排查缓存用） */
 .v-ver { position: absolute; right: 10px; bottom: 6px; z-index: 2; font-size: 9px; letter-spacing: .5px; color: var(--text-3); opacity: .5; pointer-events: none; }
+
+/* ============ 会话卡内联改名（⋯ → 改名） ============ */
+/* 改名不再打开二级操作单：标题行直接换成输入框 + 保存/取消，卡片保持原位。 */
+.session-card.renaming { border-color: var(--accent); cursor: default; }
+.session-card.renaming .row1,
+.session-card.renaming .s-dots,
+.session-card.renaming .row3,
+.session-card.renaming .team-rail { display: none; }
+.session-card.renaming .s-main { padding-right: 0; }
+.session-card.renaming .s-preview { color: var(--text-3); }
+.s-rename-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-card .s-rename-input {
+  flex: 1; min-width: 0; height: 40px; box-sizing: border-box;
+  border: 1px solid var(--accent); border-radius: 10px;
+  background: var(--bg-card-2); color: var(--text);
+  font-family: var(--font); font-size: 16px; font-weight: 600;
+  padding: 0 10px; outline: none; -webkit-appearance: none; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+.s-rename-input::placeholder { color: var(--text-3); font-weight: 400; }
+html.light .s-rename-input { background: #fff; }
+.s-rename-btn {
+  flex: none; width: 40px; height: 40px; padding: 0; border-radius: 10px;
+  border: .5px solid var(--line); background: var(--bg-card-2); color: var(--text-2);
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.s-rename-btn .ic { display: flex; }
+.s-rename-btn.s-rename-ok { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.s-rename-btn:active { transform: scale(.94); }
+.s-rename-btn[disabled] { opacity: .45; }
