@@ -85,6 +85,8 @@ const ICONS = {
   send: SVG_OPEN + '<path d="M12 19V5M5 12l7-7 7 7"/></svg>',
   expand: SVG_OPEN + '<path d="M14 4h6v6M20 4l-6 6M10 20H4v-6M4 20l6-6"/></svg>',
   chevDown: SVG_OPEN + '<path d="m6 9 6 6 6-6"/></svg>',
+  arrowUp: SVG_OPEN + '<path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+  arrowDown: SVG_OPEN + '<path d="M12 5v14M19 12l-7 7-7-7"/></svg>',
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
   folder: SVG_OPEN + '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>',
   warn: SVG_OPEN + '<path d="M12 3 2.5 20h19L12 3z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.2" r=".5" fill="currentColor"/></svg>',
@@ -488,6 +490,29 @@ function sess(id) {
   }
   return s
 }
+/* 首页会话卡：长按展开最近消息（手势状态；DOM 在首次长按时创建） */
+const Peek = {
+  active: false,
+  pressing: false,
+  finishing: false,
+  sid: null,
+  card: null,
+  stage: null,
+  layer: null,
+  target: null,
+  start: null,
+  gen: 0,
+  raw: 0,
+  startPointerY: 0,
+  intent: null,
+  armed: false,
+  dragging: false,
+  msgs: [],
+  liveText: '',
+  liveTimer: null,
+  suppressUntil: 0,
+}
+
 const pendingCount = () => {
   let n = 0
   for (const s of S.sessions.values()) {
@@ -3790,15 +3815,519 @@ document.addEventListener('pointerdown', (e) => {
 let sessMenuTimer = null
 function initSessionLongPress(sc) {
   if (!sc) return
-  // 移动端用卡片右侧的 ⋯ 菜单；长按容易触发系统文字选择，已弃用。
-  // 桌面调试：右键唤出
+  // 移动端用卡片右侧的 ⋯ 菜单；长按现在是「展开最近消息预览」，见 initPeekGestures。
+  // 桌面调试：右键唤出会话操作单。
   sc.addEventListener('contextmenu', (e) => {
     const card = e.target.closest && e.target.closest('.session-card')
     if (!card) return
     e.preventDefault()
+    if (Peek.pressing || Peek.active) return
     openSessionMenu(card.dataset.sid, e.clientX, e.clientY)
   })
 }
+
+/* ================= 首页会话卡：长按展开最近消息（原型通过） ================= */
+const PEEK_HOLD_MS = 380
+const PEEK_MOVE_CANCEL = 8
+const PEEK_THRESHOLD = 56
+const PEEK_MSGS = 8
+const PEEK_MAX_WIDTH = 756
+
+function peekClearSelection() {
+  try {
+    const sel = window.getSelection && window.getSelection()
+    if (sel && sel.rangeCount) sel.removeAllRanges()
+  } catch (e) {}
+}
+
+/* 让预览卡让开上下两条 HUD；iPhone 的 safe-area 由 env() 决定，用探针读一次 */
+function peekSafeInsets() {
+  const probe = el('div')
+  probe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+    'padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)'
+  document.body.appendChild(probe)
+  const cs = getComputedStyle(probe)
+  const out = { top: parseFloat(cs.paddingTop) || 0, bottom: parseFloat(cs.paddingBottom) || 0 }
+  probe.remove()
+  return out
+}
+
+function peekMessageText(e) {
+  if (!e) return ''
+  if (e.type === 'user/message' && e.data && e.data.source && e.data.source.kind === 'user') {
+    const c = e.data.content
+    const t = typeof c === 'string' ? c : textOf(c)
+    return String(t || '').replace(/\r/g, '').trim()
+  }
+  if (e.type === 'assistant/message') {
+    const c = e.data && (e.data.message ? e.data.message.content : e.data.content)
+    const t = typeof c === 'string' ? c : textOf(c)
+    return String(t || '').replace(/\r/g, '').trim()
+  }
+  return ''
+}
+
+function peekFallbackMsgs(s) {
+  const out = []
+  const q = previewText(s.lastPrompt)
+  if (q) out.push({ who: 'you', text: q })
+  const a = previewText(s.livePreview || s.lastPreview)
+  if (a) out.push({ who: 'ai', text: a, live: !!s.livePreview })
+  return out
+}
+
+/* 最近消息：沿用列表的 session/page 尾部拉取，只取用户/助手的文字，不进工具/思考。
+   一次按住多一次请求；同一 asOf 的尾部缓存 12s。 */
+async function peekLoadMessages(s) {
+  const asOf = s.asOfSeq || 0
+  if (s._peekCache && s._peekCache.asOf === asOf && Date.now() - s._peekCache.at < 12000) {
+    return { msgs: s._peekCache.msgs, error: null }
+  }
+  if (!asOf) return { msgs: peekFallbackMsgs(s), error: null }
+  try {
+    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 64 } })
+    const recs = (pg.records || []).map((r) => r.event || r).filter(Boolean)
+    const msgs = []
+    for (const e of recs) {
+      const text = peekMessageText(e)
+      if (!text) continue
+      msgs.push({ who: e.type === 'user/message' ? 'you' : 'ai', text })
+    }
+    const out = msgs.slice(-PEEK_MSGS)
+    s._peekCache = { asOf, at: Date.now(), msgs: out }
+    return { msgs: out, error: null }
+  } catch (e) {
+    return { msgs: peekFallbackMsgs(s), error: e }
+  }
+}
+
+function peekHeadHTML(s) {
+  const ws = wsLabelOf(s)
+  const [bcls, blabel] = statusBadge(s)
+  const badge = bcls === 'done' ? '' :
+    '<span class="badge ' + bcls + '"><span class="b-dot"></span><span>' + esc(blabel) + '</span></span>'
+  return '<div class="pk-head">' +
+      '<div class="pk-title-row"><div class="pk-title">' + esc(sessTitle(s)) + '</div>' +
+        '<span class="pk-time">' + esc(fmtTime(s.updatedAt)) + '</span></div>' +
+      '<div class="pk-meta">' + badge +
+        (ws ? '<span class="pk-ws">' + esc(ws) + '</span>' : '') +
+        '<span class="pk-preview-tag">预览</span></div>' +
+    '</div>'
+}
+function peekLoadingHTML() {
+  return '<div class="pk-loading" aria-hidden="true">' +
+    '<div class="pk-skel w70"></div><div class="pk-skel w52"></div><div class="pk-skel w62"></div>' +
+  '</div>'
+}
+function peekEmptyHTML(error) {
+  return '<div class="pk-note' + (error ? ' err' : '') + '">' +
+    (error ? '最近消息读取失败 · 上滑仍然可以打开会话' : '还没有消息') + '</div>'
+}
+function peekStageHTML(s) {
+  return peekHeadHTML(s) +
+    '<div class="pk-thread">' + peekLoadingHTML() + '</div>' +
+    '<div class="pk-foot"><span class="pk-dot"></span><span class="pk-foot-label">正在读取最近消息…</span>' +
+      '<span class="pk-foot-hint">中间松手取消</span></div>'
+}
+function peekTargetsHTML() {
+  return '<div class="peek-backdrop" aria-hidden="true"></div>' +
+    '<div class="peek-target" data-dir="open"><div class="pt-ring"></div>' +
+      '<div class="pt-copy"><b class="pt-label">打开会话</b><span class="pt-sub">上滑</span></div></div>' +
+    '<div class="peek-target" data-dir="close"><div class="pt-ring"></div>' +
+      '<div class="pt-copy"><b class="pt-label">关闭卡片</b><span class="pt-sub">下滑</span></div></div>'
+}
+function peekMsgsHTML(msgs) {
+  return msgs.map((m) =>
+    '<div class="pk-msg ' + (m.who === 'you' ? 'you' : 'bot') + '"><div class="pk-bubble">' + esc(m.text) + '</div></div>'
+  ).join('')
+}
+function peekMarkShort() {
+  if (!Peek.stage) return
+  const thread = Peek.stage.querySelector('.pk-thread')
+  if (!thread) return
+  thread.classList.remove('short')
+  const cs = getComputedStyle(thread)
+  const gap = parseFloat(cs.rowGap) || 0
+  const kids = thread.querySelectorAll('.pk-msg')
+  let h = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+  for (const k of kids) h += k.getBoundingClientRect().height
+  h += Math.max(0, kids.length - 1) * gap
+  if (thread.clientHeight - h > 120) thread.classList.add('short')
+}
+function peekFoot() {
+  if (!Peek.stage) return
+  const s = sess(Peek.sid)
+  const label = Peek.stage.querySelector('.pk-foot-label')
+  const dot = Peek.stage.querySelector('.pk-dot')
+  if (label) label.textContent = s && s.running ? '运行中 · 实时预览' : '最近消息'
+  if (dot) dot.classList.toggle('run', !!(s && s.running))
+}
+function peekRenderMessages(s, msgs, error) {
+  if (!Peek.stage) return
+  const thread = Peek.stage.querySelector('.pk-thread')
+  if (!thread) return
+  Peek.msgs = msgs || []
+  if (!Peek.msgs.length) {
+    thread.classList.remove('short')
+    thread.innerHTML = peekEmptyHTML(error)
+  } else {
+    thread.innerHTML = peekMsgsHTML(Peek.msgs)
+  }
+  peekFoot()
+  peekSyncLive()
+  peekMarkShort()
+}
+/* 运行中的会话：把列表已经在刷新的 livePreview 接在最后一条后面，按住期间持续更新 */
+function peekSyncLive() {
+  if (!Peek.active || Peek.finishing || !Peek.stage) return
+  const thread = Peek.stage.querySelector('.pk-thread')
+  if (!thread) return
+  const s = sess(Peek.sid)
+  const live = s && s.running ? String(s.livePreview || '') : ''
+  const existing = thread.querySelector('[data-peek-live]')
+  if (!live) {
+    if (existing) existing.remove()
+    Peek.liveText = ''
+    peekFoot()
+    return
+  }
+  if (existing) {
+    const b = existing.querySelector('.pk-bubble')
+    if (b) b.textContent = live
+    if (b) b.appendChild(el('i', 'pk-caret'))
+    Peek.liveText = live
+    peekFoot()
+    return
+  }
+  const lastAi = [...Peek.msgs].reverse().find((m) => m.who === 'ai')
+  if (lastAi && lastAi.text && (lastAi.text === live || lastAi.text.includes(live))) {
+    Peek.liveText = live
+    peekFoot()
+    return
+  }
+  const row = el('div', 'pk-msg bot')
+  row.dataset.peekLive = '1'
+  const bubble = el('div', 'pk-bubble')
+  bubble.textContent = live
+  bubble.appendChild(el('i', 'pk-caret'))
+  row.appendChild(bubble)
+  thread.appendChild(row)
+  const rows = thread.querySelectorAll('.pk-msg')
+  if (rows.length > PEEK_MSGS + 1) rows[0].remove()
+  Peek.liveText = live
+  peekFoot()
+  peekMarkShort()
+}
+
+function startPeek(card, startPointerY) {
+  if (Peek.active || Peek.finishing || !card) return
+  const s = sess(card.dataset.sid)
+  if (!s) return
+  peekClearSelection()
+  hideSelectorMenu()
+  const r = card.getBoundingClientRect()
+  const ar = $('#app').getBoundingClientRect()
+  const safe = peekSafeInsets()
+  const side = 10
+  const gap = 64
+  const width = Math.min(PEEK_MAX_WIDTH, Math.max(240, Math.round(ar.width - side * 2)))
+  const target = {
+    left: Math.round((ar.width - width) / 2),
+    top: Math.round(safe.top + gap),
+    width,
+    height: Math.max(240, Math.round(ar.height - (safe.top + gap) - (safe.bottom + gap))),
+  }
+  let layer = $('#peek-layer')
+  if (!layer) {
+    layer = el('div', 'peek-layer')
+    layer.id = 'peek-layer'
+    layer.setAttribute('aria-hidden', 'true')
+    layer.innerHTML = peekTargetsHTML()
+    const openRing = layer.querySelector('.peek-target[data-dir="open"] .pt-ring')
+    const closeRing = layer.querySelector('.peek-target[data-dir="close"] .pt-ring')
+    if (openRing) openRing.appendChild(icon('arrowUp', 17))
+    if (closeRing) closeRing.appendChild(icon('arrowDown', 17))
+    $('#app').appendChild(layer)
+  }
+  layer.className = 'peek-layer on'
+  layer.querySelectorAll('.peek-target .pt-ring').forEach((ring) => ring.style.setProperty('--p', '0'))
+  const openSubReset = layer.querySelector('.peek-target[data-dir="open"] .pt-sub')
+  const closeSubReset = layer.querySelector('.peek-target[data-dir="close"] .pt-sub')
+  if (openSubReset) openSubReset.textContent = '上滑'
+  if (closeSubReset) closeSubReset.textContent = '下滑'
+  const old = layer.querySelector('.peek-stage')
+  if (old) old.remove()
+  const stage = el('div', 'peek-stage')
+  stage.innerHTML = peekStageHTML(s)
+  stage.style.left = Math.round(r.left) + 'px'
+  stage.style.top = Math.round(r.top) + 'px'
+  stage.style.width = Math.round(r.width) + 'px'
+  stage.style.height = Math.round(r.height) + 'px'
+  layer.appendChild(stage)
+  Peek.active = true
+  Peek.finishing = false
+  Peek.pressing = false
+  Peek.sid = s.id
+  Peek.card = card
+  Peek.stage = stage
+  Peek.layer = layer
+  Peek.target = target
+  Peek.start = { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }
+  Peek.raw = 0
+  Peek.startPointerY = Number(startPointerY) || 0
+  Peek.intent = null
+  Peek.armed = false
+  Peek.dragging = false
+  Peek.msgs = []
+  Peek.liveText = ''
+  Peek.gen += 1
+  const gen = Peek.gen
+  card.style.visibility = 'hidden'
+  $('#app').classList.add('peeking')
+  Peek.suppressUntil = Date.now() + 1600
+  vibrate(10)
+  requestAnimationFrame(() => {
+    if (!Peek.active || Peek.gen !== gen) return
+    layer.classList.add('show')
+    stage.classList.add('expanding')
+    void stage.offsetWidth
+    stage.style.left = target.left + 'px'
+    stage.style.top = target.top + 'px'
+    stage.style.width = target.width + 'px'
+    stage.style.height = target.height + 'px'
+  })
+  peekLoadMessages(s).then((res) => {
+    if (!Peek.active || Peek.gen !== gen) return
+    peekRenderMessages(s, res.msgs, res.error)
+  })
+  clearInterval(Peek.liveTimer)
+  Peek.liveTimer = setInterval(() => {
+    if (Peek.active) peekSyncLive()
+  }, 700)
+}
+function hideSelectorMenu() {
+  if (cardMenuState.sid) closeCardMenu(false)
+}
+
+function peekUpdateDrag(rawY) {
+  if (!Peek.active || Peek.finishing || !Peek.stage) return
+  const raw = rawY
+  if (!Peek.dragging && Math.abs(raw) > 0.5) {
+    Peek.dragging = true
+    Peek.stage.style.transition = 'none'
+  }
+  Peek.raw = raw
+  const sign = raw < 0 ? -1 : 1
+  const abs = Math.abs(raw)
+  const eased = abs <= 80 ? abs : 80 + (abs - 80) * 0.4
+  const visual = sign * Math.min(eased * 0.12, 6)
+  const p = Math.min(1, abs / PEEK_THRESHOLD)
+  Peek.stage.style.transform = 'translate3d(0,' + visual + 'px,0) scale(' + (1 - p * 0.006) + ')'
+  const intent = abs < 10 ? null : (raw < 0 ? 'open' : 'close')
+  Peek.intent = intent
+  const armed = abs >= PEEK_THRESHOLD && intent
+  if (armed && !Peek.armed) { Peek.armed = true; vibrate(14) }
+  else if (!armed && Peek.armed) Peek.armed = false
+  const layer = Peek.layer
+  layer.classList.toggle('to-open', intent === 'open')
+  layer.classList.toggle('to-close', intent === 'close')
+  layer.classList.toggle('armed-open', armed === 'open')
+  layer.classList.toggle('armed-close', armed === 'close')
+  const openRing = layer.querySelector('.peek-target[data-dir="open"] .pt-ring')
+  const closeRing = layer.querySelector('.peek-target[data-dir="close"] .pt-ring')
+  if (openRing) openRing.style.setProperty('--p', intent === 'open' ? p.toFixed(3) : '0')
+  if (closeRing) closeRing.style.setProperty('--p', intent === 'close' ? p.toFixed(3) : '0')
+  const openSub = layer.querySelector('.peek-target[data-dir="open"] .pt-sub')
+  const closeSub = layer.querySelector('.peek-target[data-dir="close"] .pt-sub')
+  if (openSub) openSub.textContent = armed === 'open' ? '松开即生效' : '上滑'
+  if (closeSub) closeSub.textContent = armed === 'close' ? '松开即生效' : '下滑'
+  const foot = Peek.stage.querySelector('.pk-foot-hint')
+  if (foot) {
+    if (armed === 'open') foot.textContent = '松开打开会话'
+    else if (armed === 'close') foot.textContent = '松开关闭卡片'
+    else if (intent === 'open') foot.textContent = '继续上滑 · 松开打开'
+    else if (intent === 'close') foot.textContent = '继续下滑 · 松开关闭'
+    else foot.textContent = '中间松手取消'
+  }
+}
+
+function peekArchive(sid) {
+  const s = sess(sid)
+  if (!s) return
+  const title = sessTitle(s)
+  toast('正在收起…')
+  rpc('workspace/archiveSession', { request: { sessionId: sid } }).then((av) => {
+    if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
+    S.sessions.delete(sid)
+    renderList()
+    refreshBadges()
+    toast('已收起「' + title + '」· 可在桌面端恢复')
+  }).catch((e) => {
+    S.archived.delete(sid)
+    const card = $('#session-list .session-card[data-sid="' + sid + '"]')
+    if (card) card.style.visibility = ''
+    toast('收起失败：' + e.message, true)
+  })
+}
+
+function peekCloseLayer() {
+  const layer = Peek.layer
+  clearInterval(Peek.liveTimer)
+  Peek.liveTimer = null
+  Peek.active = false
+  Peek.pressing = false
+  Peek.finishing = false
+  const sid = Peek.sid
+  const card = sid ? $('#session-list .session-card[data-sid="' + sid + '"]') : null
+  if (card) card.style.visibility = ''
+  if (layer) {
+    layer.classList.remove('on', 'show', 'to-open', 'to-close', 'armed-open', 'armed-close', 'committing')
+    const stage = layer.querySelector('.peek-stage')
+    if (stage) stage.remove()
+  }
+  $('#app').classList.remove('peeking')
+  Peek.sid = null
+  Peek.card = null
+  Peek.stage = null
+  Peek.layer = null
+  Peek.target = null
+  Peek.start = null
+  Peek.raw = 0
+  Peek.startPointerY = 0
+  Peek.intent = null
+  Peek.armed = false
+  Peek.dragging = false
+  Peek.msgs = []
+  Peek.liveText = ''
+  Peek.suppressUntil = Date.now() + 700
+}
+
+function finishPeek(cancelled) {
+  if (!Peek.active || Peek.finishing) return
+  Peek.finishing = true
+  Peek.pressing = false
+  const commit = !cancelled && Peek.intent && Math.abs(Peek.raw) >= PEEK_THRESHOLD
+  const intent = Peek.intent
+  const sid = Peek.sid
+  const stage = Peek.stage
+  const layer = Peek.layer
+  const start = Peek.start
+  const gen = Peek.gen
+  Peek.suppressUntil = Date.now() + 1600
+  if (commit) vibrate(12)
+  layer.classList.add('committing')
+  const bd = layer.querySelector('.peek-backdrop')
+  if (commit && intent === 'open') {
+    stage.style.transition = 'transform .24s cubic-bezier(.2,.9,.25,1), opacity .2s ease'
+    stage.style.transform = 'translate3d(0,-44px,0) scale(1.02)'
+    stage.style.opacity = '0'
+    if (bd) bd.style.opacity = '0'
+    setTimeout(() => {
+      if (Peek.gen !== gen) return
+      peekCloseLayer()
+      location.hash = '#/s/' + sid
+    }, 240)
+    return
+  }
+  if (commit && intent === 'close') {
+    stage.style.transition = 'transform .24s cubic-bezier(.2,.9,.25,1), opacity .2s ease'
+    stage.style.transform = 'translate3d(0,120px,0) scale(.97)'
+    stage.style.opacity = '0'
+    setTimeout(() => {
+      if (Peek.gen !== gen) return
+      if (bd) { bd.style.transition = 'opacity .18s ease'; bd.style.opacity = '0' }
+    }, 170)
+    setTimeout(() => {
+      if (Peek.gen !== gen) return
+      peekCloseLayer()
+      const current = $('#session-list .session-card[data-sid="' + sid + '"]')
+      if (current) current.style.visibility = 'hidden'
+      peekArchive(sid)
+    }, 380)
+    return
+  }
+  stage.style.transition = 'left .26s cubic-bezier(.32,.72,0,1), top .26s cubic-bezier(.32,.72,0,1), width .26s cubic-bezier(.32,.72,0,1), height .26s cubic-bezier(.32,.72,0,1), border-radius .26s cubic-bezier(.32,.72,0,1), transform .26s cubic-bezier(.32,.72,0,1)'
+  stage.style.left = start.left + 'px'
+  stage.style.top = start.top + 'px'
+  stage.style.width = start.width + 'px'
+  stage.style.height = start.height + 'px'
+  stage.style.transform = 'translate3d(0,0,0) scale(1)'
+  if (bd) bd.style.opacity = '0'
+  setTimeout(() => {
+    if (Peek.gen !== gen) return
+    peekCloseLayer()
+  }, 280)
+}
+
+function initPeekGestures(sc) {
+  if (!sc) return
+  let press = null
+  const clearPress = () => {
+    if (press && press.timer) clearTimeout(press.timer)
+    press = null
+    Peek.pressing = false
+  }
+  sc.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    if (e.isPrimary === false || Peek.active || Peek.finishing) return
+    if (S.current) return
+    const listView = $('#view-list')
+    if (!listView || !listView.classList.contains('active')) return
+    peekClearSelection()
+    const card = e.target && e.target.closest ? e.target.closest('.session-card') : null
+    if (!card || (e.target.closest && e.target.closest('.s-dots'))) return
+    if (card.classList.contains('renaming') || inlineRename) return
+    if (cardMenuState.sid) return
+    const sid = card.dataset.sid
+    Peek.pressing = true
+    press = { id: e.pointerId, sid, x: e.clientX, y: e.clientY, timer: null }
+    press.timer = setTimeout(() => {
+      if (!press || Peek.active || Peek.finishing) return
+      const cur = $('#session-list .session-card[data-sid="' + sid + '"]')
+      const startY = press ? press.y : 0
+      clearPress()
+      if (cur) startPeek(cur, startY)
+    }, PEEK_HOLD_MS)
+  })
+  window.addEventListener('pointermove', (e) => {
+    if (Peek.active) {
+      if (Peek.finishing) return
+      peekUpdateDrag(e.clientY - Peek.startPointerY)
+      return
+    }
+    if (!press || e.pointerId !== press.id) return
+    if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > PEEK_MOVE_CANCEL) clearPress()
+  }, { passive: true })
+  window.addEventListener('pointerup', (e) => {
+    if (Peek.active && !Peek.finishing) { finishPeek(false); return }
+    if (press && e.pointerId === press.id) clearPress()
+  })
+  window.addEventListener('pointercancel', (e) => {
+    if (Peek.active && !Peek.finishing) { finishPeek(true); return }
+    if (press && e.pointerId === press.id) clearPress()
+  })
+  window.addEventListener('blur', () => { if (Peek.active && !Peek.finishing) finishPeek(true); clearPress() })
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && Peek.active && !Peek.finishing) finishPeek(true) })
+  window.addEventListener('resize', () => { if (Peek.active && !Peek.finishing) finishPeek(true) })
+  document.addEventListener('touchmove', (e) => {
+    if (Peek.active && e.cancelable) e.preventDefault()
+  }, { passive: false })
+  document.addEventListener('click', (e) => {
+    if (Date.now() < Peek.suppressUntil) { e.preventDefault(); e.stopPropagation() }
+  }, true)
+  document.addEventListener('selectionchange', () => {
+    if (Peek.pressing || Peek.active) peekClearSelection()
+  })
+  document.addEventListener('selectstart', (e) => {
+    if (Peek.pressing || Peek.active) { e.preventDefault(); return }
+    const t = e.target
+    if (!t || !t.closest) return
+    // 列表选区锁不能连内联改名的输入框一起禁掉；输入框里要能拖选标题文字。
+    if (t.closest('.s-rename-input')) return
+    if (t.closest('#list-scroll')) e.preventDefault()
+  })
+}
+
 function openSessionMenu(sid, x, y, expandRename) {
   if (inlineRename) cancelCardRename(false)
   const s = sess(sid)
@@ -8327,6 +8856,7 @@ function initPtr(sc) {
     if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; decided = false; pulling = false }
   }, { passive: true })
   sc.addEventListener('touchmove', (e) => {
+    if (Peek.active) { pulling = false; decided = false; ind.classList.remove('show'); return }
     const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy
     if (!decided) {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
@@ -8340,6 +8870,7 @@ function initPtr(sc) {
     } else if (dy <= 4) ind.classList.remove('show')
   }, { passive: true })
   const finish = (e) => {
+    if (Peek.active) { pulling = false; decided = false; ind.classList.remove('show'); return }
     if (!pulling) { decided = false; return }
     pulling = false; decided = false
     const dy = e.changedTouches[0].clientY - sy
@@ -9013,6 +9544,7 @@ function buildShell() {
   $('#q-ov').addEventListener('click', (e) => { if (e.target.id === 'q-ov') closeQSheet() })
   // 会话长按操作单：初始化 + 背景关闭
   initSessionLongPress($('#list-scroll'))
+  initPeekGestures($('#list-scroll'))
   // 选区片段引用：框选消息里的文字 → 浮动「引用」（复用 quoteNow 进 chips + 注解面板）
   initQuoteSelection()
   $('#sess-ov').addEventListener('click', (e) => { if (e.target.id === 'sess-ov') closeSessionMenu() })
