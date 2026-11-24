@@ -4321,7 +4321,10 @@ function initPeekGestures(sc) {
   document.addEventListener('selectstart', (e) => {
     if (Peek.pressing || Peek.active) { e.preventDefault(); return }
     const t = e.target
-    if (t && t.closest && t.closest('#list-scroll')) e.preventDefault()
+    if (!t || !t.closest) return
+    // 列表选区锁不能连内联改名的输入框一起禁掉；输入框里要能拖选标题文字。
+    if (t.closest('.s-rename-input')) return
+    if (t.closest('#list-scroll')) e.preventDefault()
   })
 }
 
