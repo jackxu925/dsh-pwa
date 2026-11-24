@@ -3885,7 +3885,7 @@ async function peekLoadMessages(s) {
   }
   if (!asOf) return { msgs: peekFallbackMsgs(s), error: null }
   try {
-    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 32 } })
+    const pg = await rpc('session/page', { request: { address: { kind: 'session', sessionId: s.id }, throughSeq: asOf, maxMessages: 64 } })
     const recs = (pg.records || []).map((r) => r.event || r).filter(Boolean)
     const msgs = []
     for (const e of recs) {
@@ -4276,6 +4276,7 @@ function initPeekGestures(sc) {
     peekClearSelection()
     const card = e.target && e.target.closest ? e.target.closest('.session-card') : null
     if (!card || (e.target.closest && e.target.closest('.s-dots'))) return
+    if (card.classList.contains('renaming') || inlineRename) return
     if (cardMenuState.sid) return
     const sid = card.dataset.sid
     Peek.pressing = true
