@@ -264,8 +264,8 @@ const DIAG_APP = (() => {
   try {
     const src = document.currentScript && document.currentScript.src
     const m = src && /[?&]v=([\w.-]+)/.exec(src)
-    return m ? m[1] : '1.22.0'
-  } catch (e) { return '1.22.0' }
+    return m ? m[1] : '1.22.2'
+  } catch (e) { return '1.22.2' }
 })()
 const Diag = {
   sid: (() => {
@@ -2620,6 +2620,36 @@ function pinGroup() {
   return h
 }
 function savePinned() { try { localStorage.setItem('dshm-pinned', JSON.stringify([...S.pinned])) } catch (e) {} }
+
+/* 搜索框内的清除键：只跟「输入框有没有值」走（空格也算），清空后保持焦点。
+   视觉 18px，热区 44×44；绝对定位，不推文字、不撑高。 */
+function syncSearchX() {
+  const inp = $('#search'), x = $('#search-x')
+  if (!inp || !x) return
+  const on = inp.value.length > 0
+  x.classList.toggle('on', on)
+  x.setAttribute('aria-hidden', on ? 'false' : 'true')
+  x.tabIndex = on ? 0 : -1
+}
+function clearSearch() {
+  const inp = $('#search')
+  if (!inp) return
+  if (inp.value) {
+    inp.value = ''
+    inp.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  inp.focus({ preventScroll: true })
+  vibrate(8)
+}
+function syncListSeg(qRaw) {
+  const seg = $('#list-seg')
+  if (!seg) return
+  const input = $('#search')
+  const q = qRaw != null ? qRaw : (input ? input.value.trim() : '')
+  const h = location.hash || '#/'
+  // 分段控件在“搜索中”让位给范围摘要；列表页待办过滤/会话页仍和原来一样隐藏
+  seg.style.display = (h === '#/' && !S.todoMode && !q) ? 'flex' : 'none'
+}
 function renderList() {
   // 卡片内联改名期间冻结重绘：后台投影/流式帧的 300ms 列表刷新会换掉正在输入的 DOM，
   // 中文输入法组字被打断、未提交的草稿也会丢。改名结束（保存/取消）后统一重绘。
@@ -2638,10 +2668,15 @@ function renderList() {
     .sort((a, b) => b.updatedAt - a.updatedAt)
   // 同步分段控件的选中态
   document.querySelectorAll('.seg-btn').forEach((b) => { const on = b.dataset.mode === S.listMode; b.classList.toggle('sel', on); b.setAttribute('aria-pressed', on ? 'true' : 'false') })
+  // 清除键/范围摘要/分段控件都先同步，再走各分支——否则在“待办”或“自动化”页里
+  // 开始搜索后再清空，会停在搜索态的隐藏分段控件上。
+  syncSearchX()
+  syncListSeg(qRaw)
+  updateSearchScope(qRaw, visible.length)
   // 提醒中心：第三档就地渲染（同屏切换，无中间页）；搜索时仍回落到会话结果
   if (S.listMode === 'rem' && !q) { setListTitle('自动化'); renderRemList(wrap); return }
   setListTitle(null)  // 大标题默认「会话」；下钻工作区时再覆盖为工作区名
-  if (S.todoMode) {
+  if (S.todoMode && !qRaw) {
     visible = visible.filter(hasPending)
     if (!visible.length) {
       wrap.appendChild(el('div', 'empty-state', '没有待处理的事项 ✓'))
@@ -2661,26 +2696,17 @@ function renderList() {
     }
     return
   }
-  if (!visible.length) {
-    // 空态按语境分岔：搜了没命中 ≠ 没有会话（后者会被读成「我的会话没了」）；
-    // 冷启动列表未落地时也不给结论，给加载态
-    if (q) {
-      const box = el('div', 'empty-state')
-      box.appendChild(el('div', null, '没有标题或路径含「' + qRaw + '」的会话'))
-      const waiting = S.glob.loading && S.glob.q === qRaw
-      const indexing = S.glob.building && (S.glob.total === 0 || S.glob.indexed < S.glob.total)
-      const sub = indexing && S.glob.q === qRaw
-        ? (S.glob.total ? '正在建立消息索引（' + S.glob.indexed + '/' + S.glob.total + '）…' : '正在准备消息搜索…')
-        : waiting ? '正在搜索消息内容…' : '看看下面的消息内容结果'
-      box.appendChild(el('div', 'empty-sub', sub))
-      const clear = el('button', 'empty-clear', '清除搜索')
-      clear.type = 'button'
-      clear.onclick = () => { const inp = $('#search'); if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })) } vibrate(8) }
-      box.appendChild(clear)
-      wrap.appendChild(box)
-      renderGlobSection(wrap, qRaw, false)
-      return
+  // 搜索是跨「标题/路径 + 消息内容」的一个结果面：先给会话命中，再把消息命中接在下面；
+  // 未命中标题/路径只是范围信息，不再先铺一块空状态。
+  if (qRaw) {
+    if (visible.length) {
+      wrap.appendChild(searchSectionHead('会话', 'chat'))
+      for (const s of visible) wrap.appendChild(sessionCard(s, true))
     }
+    renderGlobSection(wrap, qRaw, visible.length > 0)
+    return
+  }
+  if (!visible.length) {
     if (!S.listLoaded) {
       wrap.appendChild(el('div', 'empty-state', '正在加载会话…'))
       return
@@ -2689,13 +2715,6 @@ function renderList() {
     return
   }
   // 「继续上次会话」置顶入口已移除：两级工作区视图 + 「最近活跃」时间视图都能一步直达最近对话
-  // 搜索结果是跨工作区的检索：平铺 + 卡片标注工作区，比钻取更直接；
-  // 本地命中（标题/路径）之下再拼一段「消息内容命中」（本地消息索引 / api）
-  if (q) {
-    for (const s of visible) wrap.appendChild(sessionCard(s, true))
-    renderGlobSection(wrap, qRaw, true)
-    return
-  }
   // 按时间视图：置顶会话单独成组放在最前，其余按最近活跃降序，
   // 再按「今天 / 昨天 / 近 7 天 / 更早」分组；日期头不给数量，避免每个头都变成一屏噪声。
   if (S.listMode === 'time') {
@@ -2784,11 +2803,17 @@ function scheduleGlobSearch() {
   clearTimeout(g.timer)
   clearTimeout(g.poll)
   g.polls = 0
-  if (q.length < 2) {
-    g.seq++; g.loading = false; g.error = false; g.results = []; g.hasMore = false
-    g.building = false; g.indexed = 0; g.total = 0
-    return
-  }
+  g.seq++   // 输入已前进：作废在途响应，旧词结果不能覆盖新词
+  g.loading = false
+  g.error = false
+  g.results = []
+  g.hasMore = false
+  g.building = false
+  g.indexed = 0
+  g.total = 0
+  if (q.length < 2) return
+  // 防抖窗内也算“搜索中”：范围摘要先给反馈，不预支“没有命中”
+  g.loading = true
   g.timer = setTimeout(runGlobSearch, 350)
 }
 async function runGlobSearch() {
@@ -2818,41 +2843,94 @@ async function runGlobSearch() {
   }
   if (S.glob.q === q) renderListSoon()
 }
-/* 搜索视图里拼「消息内容命中」段；hasLocal=本地标题/路径已有命中（无命中时的提示才不重复） */
+/* 有效消息命中（旧宿主/坏数据里可能夹空项） */
+function validGlobHits() { return (S.glob.results || []).filter((h) => h && h.sessionId) }
+function globIndexing() {
+  const g = S.glob
+  return !!g.building && (g.total === 0 || g.indexed < g.total)
+}
+function globProgress() {
+  const g = S.glob
+  return globIndexing() && g.total ? g.indexed + '/' + g.total : ''
+}
+function searchSectionHead(label, icName) {
+  const h = el('div', 'search-sec')
+  h.appendChild(icon(icName, 13))
+  h.appendChild(el('span', null, label))
+  return h
+}
+function searchProgress() {
+  const p = globProgress()
+  const n = el('div', 'search-progress')
+  n.appendChild(el('span', 'search-spinner'))
+  n.appendChild(el('span', null, p ? '正在建立消息索引 ' + p + '…' : '正在准备消息搜索…'))
+  return n
+}
+function searchEmptyState(q, opts) {
+  const o = opts || {}
+  const box = el('div', 'search-empty')
+  box.setAttribute('role', 'status')
+  const ic = el('div', 'se-ic')
+  ic.appendChild(icon('search', 20))
+  box.appendChild(ic)
+  if (o.error) {
+    box.appendChild(el('h3', 'se-title', '消息内容暂时没搜成'))
+    box.appendChild(el('p', 'se-sub', '标题和路径也没有命中'))
+    box.appendChild(el('p', 'se-tip', '稍后再试一次，或换个词'))
+    return box
+  }
+  box.appendChild(el('h3', 'se-title', '没有找到「' + q + '」'))
+  if (q.length < 2) {
+    box.appendChild(el('p', 'se-sub', '只搜索了会话标题与路径'))
+    box.appendChild(el('p', 'se-tip', '再输入 1 个字，就能搜索消息内容'))
+  } else {
+    box.appendChild(el('p', 'se-sub', '已搜索会话标题、路径和消息内容'))
+    box.appendChild(el('p', 'se-tip', '试试更短的关键词，或消息里出现过的词'))
+  }
+  return box
+}
+/* 搜索范围摘要：替代分段控件；只有真的 0 命中时让位给空状态 */
+function updateSearchScope(qRaw, localCount) {
+  const scope = $('#search-scope')
+  if (!scope) return
+  if (!qRaw) { scope.hidden = true; scope.textContent = ''; scope._html = ''; return }
+  const g = S.glob
+  const hits = qRaw.length >= 2 && g.q === qRaw ? validGlobHits() : []
+  const indexing = qRaw.length >= 2 && g.q === qRaw && globIndexing()
+  const searching = qRaw.length >= 2 && (g.q !== qRaw || (g.loading && !hits.length))
+  const allZero = qRaw.length >= 2 && g.q === qRaw && !localCount && !hits.length && !g.loading && !g.error && !indexing
+  if (allZero) { scope.hidden = true; scope.textContent = ''; scope._html = ''; return }
+  let html = '<span>标题/路径 <b>' + localCount + '</b></span><span class="scope-sep" aria-hidden="true"></span>'
+  if (qRaw.length < 2) html += '<span class="scope-hint">再输入 1 个字可搜索消息内容</span>'
+  else if (searching) html += '<span>消息内容 <span class="scope-live"><span class="search-spinner"></span>搜索中…</span></span>'
+  else if (g.error) html += '<span>消息内容 暂不可用</span>'
+  else html += '<span>消息内容 <b>' + hits.length + (g.hasMore ? '+' : '') + '</b></span>'
+  if (scope._html !== html) { scope.innerHTML = html; scope._html = html }
+  scope.hidden = false
+}
+/* 消息内容段：标题/路径命中已经由 renderList 放在上面；这里只处理消息结果 */
 function renderGlobSection(wrap, q, hasLocal) {
   const g = S.glob
-  // 防抖窗内/请求在途且还没有结果：先标搜索中；轮询增量时保留已有结果，避免闪断
-  if (g.q !== q || (g.loading && !(g.results || []).length)) {
-    const head = el('div', 'ws-group glob-head')
-    head.appendChild(icon('search', 14))
-    head.appendChild(el('span', null, '消息内容 · 搜索中…'))
-    wrap.appendChild(head)
+  if (q.length < 2) {
+    if (!hasLocal) wrap.appendChild(searchEmptyState(q))
     return
   }
+  if (g.q !== q) return
   if (g.error) {
-    if (!hasLocal) wrap.appendChild(el('div', 'empty-sub glob-none', '内容搜索暂不可用，稍后再试'))
+    if (!hasLocal) wrap.appendChild(searchEmptyState(q, { error: true }))
     return
   }
-  const hits = (g.results || []).filter((h) => h && h.sessionId)
-  const indexing = !!g.building && (g.total === 0 || g.indexed < g.total)
-  const progress = indexing && g.total ? g.indexed + '/' + g.total : ''
-  if (!hits.length) {
-    if (indexing) {
-      wrap.appendChild(el('div', 'empty-sub glob-none', g.total
-        ? '正在建立消息索引（' + progress + '），结果会边建边出'
-        : '正在准备消息搜索…'))
-      return
-    }
-    if (!hasLocal) wrap.appendChild(el('div', 'empty-sub glob-none', '消息内容里也没有命中'))
-    return
+  const hits = validGlobHits()
+  // 轮询增量时保留已有结果，避免每 2.5s 把结果区闪成“搜索中”
+  if (g.loading && !hits.length) return
+  const indexing = globIndexing()
+  if (hits.length) {
+    wrap.appendChild(searchSectionHead('消息内容', 'search'))
+    for (const h of hits.slice(0, 20)) wrap.appendChild(globHitNode(h, q))
   }
-  const head = el('div', 'ws-group glob-head')
-  head.appendChild(icon('search', 14))
-  head.appendChild(el('span', null, '消息内容命中（' + hits.length + (g.hasMore ? '+' : '') + '）' + (progress ? ' · 索引中 ' + progress : '')))
-  wrap.appendChild(head)
-  for (const h of hits.slice(0, 20)) wrap.appendChild(globHitNode(h, q))
-  if (progress) wrap.appendChild(el('div', 'empty-sub glob-none', '正在建立完整索引（' + progress + '），结果会继续补进来'))
-  if (g.hasMore) wrap.appendChild(el('div', 'empty-sub glob-none', '结果较多，试试更具体的关键词'))
+  if (indexing) { wrap.appendChild(searchProgress()); return }
+  if (!hits.length && !hasLocal) { wrap.appendChild(searchEmptyState(q)); return }
+  if (g.hasMore) wrap.appendChild(el('div', 'search-note', '结果较多，试试更具体的关键词'))
 }
 /* 单条命中：会话标题 + 摘要（命中词高亮）+ 工作区提示；点按直达会话 */
 function globHitNode(hit, q) {
@@ -5935,8 +6013,7 @@ function showView(name) {
 function updateTabs() {
   // 底栏已移除：这里只维护列表页附属控件的可见性
   const h = location.hash || '#/'
-  const seg = $('#list-seg')
-  if (seg) seg.style.display = (h === '#/') && !S.todoMode ? 'flex' : 'none'
+  syncListSeg()
   const fab = $('#fab-new')
   if (fab) fab.style.display = (h === '#/') ? '' : 'none'
 }
@@ -8921,7 +8998,10 @@ function buildShell() {
     <div class="scroll" id="list-scroll">
       <div class="ptr" id="ptr"></div>
       <div class="search-row">
-        <input class="search" id="search" placeholder="搜索会话" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话">
+        <div class="search-shell">
+          <input class="search" id="search" placeholder="搜索会话、消息" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="搜索会话和消息内容">
+          <button class="search-x" id="search-x" type="button" aria-label="清除搜索内容" aria-hidden="true" tabindex="-1"><span class="ic-slot" data-ic="close"></span></button>
+        </div>
         <button class="todo-chip" id="todo-chip" type="button" aria-label="只看待处理" style="display:none"></button>
       </div>
       <div class="list-seg" id="list-seg" aria-label="列表排序方式">
@@ -8929,6 +9009,7 @@ function buildShell() {
         <button class="seg-btn" data-mode="workspace" type="button" aria-pressed="false">按工作区</button>
         <button class="seg-btn" data-mode="rem" type="button" aria-pressed="false">自动化</button>
       </div>
+      <div class="search-scope" id="search-scope" role="status" aria-live="polite" hidden></div>
       <div id="session-list"></div>
     </div>
     <button class="fab" id="fab-new" type="button" aria-label="新会话"><span class="ic-slot" data-ic="plus"></span></button>
@@ -9205,7 +9286,21 @@ function buildShell() {
   gh('#ws-group-h', 'folder', '工作区')
   gh('#preset-group-h', 'robot', 'Agent 预设')
   gh('#new-input-h', 'chat', '说点什么开始（可留空）')
-  $('#search').addEventListener('input', () => { renderList(); scheduleGlobSearch() })
+  const searchInput = $('#search'), searchClear = $('#search-x')
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      syncSearchX()
+      scheduleGlobSearch()
+      renderList()
+    })
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !e.target.value) return
+      e.preventDefault()
+      e.stopPropagation()
+      clearSearch()
+    })
+  }
+  if (searchClear) searchClear.addEventListener('click', () => clearSearch())
   // 列表视图切换：最近活跃平铺 / 按工作区分组
   // 列表一滚就收起卡片 ⋯ 菜单：按钮位置会变，菜单不能悬在原地。
   const listScroll = $('#list-scroll')
