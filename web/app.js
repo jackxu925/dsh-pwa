@@ -264,8 +264,8 @@ const DIAG_APP = (() => {
   try {
     const src = document.currentScript && document.currentScript.src
     const m = src && /[?&]v=([\w.-]+)/.exec(src)
-    return m ? m[1] : '1.22.2'
-  } catch (e) { return '1.22.2' }
+    return m ? m[1] : '1.22.3'
+  } catch (e) { return '1.22.3' }
 })()
 const Diag = {
   sid: (() => {
