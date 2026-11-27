@@ -391,9 +391,11 @@ async function rpc(endpoint, args, rpcId, timeoutMs) {
       signal: AbortSignal.timeout(timeoutMs || 20000),
     })
     if (!r.ok) {
-      if (r.status === 401) markAuthExpired()
-      throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? '（登录已过期）' : r.status === 403 ? '（主机不在信任名单）' : ''))
+      if (r.status === 401) await confirmAuthExpired()
+      throw new Error(endpoint + ': HTTP ' + r.status + (r.status === 401 ? (S.authExpired ? '（登录已过期）' : '（鉴权暂不可用，稍后重试）') : r.status === 403 ? '（主机不在信任名单）' : ''))
     }
+    // 走到这里说明服务端认了 cookie：之前若因热重载窗口的瞬时 401 锁存过「登录已过期」，现在撤销。
+    clearAuthExpired()
     const full = await r.json()
     if (!full.result || !full.result.ok) {
       const err = full.result && full.result.error
@@ -5449,6 +5451,31 @@ function markAuthExpired() {
   S.authExpired = true
   renderAuthBanner()
 }
+/* 401 复核：服务端在 connection 热重载的瞬间会对所有 API 一律回 401（dsh-client-connection 在
+   disposed 期间就是这么设计的，与"没登录"同一个状态码），而浏览器里的 cookie 其实还有效。
+   直接锁存会把一次几秒的抖动变成永久的「登录已过期」。这里隔 1.5s 用 GET / 复核一次：它走的是
+   同一套 cookie 校验，但不受重载窗口影响——cookie 真没了才会再 401。并发命中共用一次复核；
+   网络错误不锁存（那是断线，交给常规重连）。 */
+let authProbe = null
+async function confirmAuthExpired() {
+  if (S.authExpired) return
+  if (!authProbe) {
+    authProbe = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      try {
+        const r = await fetch('/', { credentials: 'same-origin', cache: 'no-store' })
+        if (r.status === 401) markAuthExpired()
+      } catch (e) { /* 网络错误≠登录失效 */ }
+    })().finally(() => { authProbe = null })
+  }
+  await authProbe
+}
+/* 任何一次鉴权成功的信号（RPC 2xx、WS 就绪）都说明 cookie 还活着：清掉横幅，让它能自愈。 */
+function clearAuthExpired() {
+  if (!S.authExpired) return
+  S.authExpired = false
+  renderAuthBanner()
+}
 function renderAuthBanner() {
   let el2 = document.getElementById('auth-banner')
   if (!S.authExpired) { if (el2) el2.remove(); return }
@@ -5553,6 +5580,8 @@ function renderOfflineStrip() {
 function setConn(state, reason, extra) {
   const prev = S.connState
   S.connState = state
+  // WS 就绪 / 列表拉成功 = 鉴权已经通过：顺手撤销可能因瞬时 401 锁存的「登录已过期」。
+  if (state === 'online') clearAuthExpired()
   // 只有状态真正变化才记一条，避免 15s 轮询/每次 loadBase 重复写日志。
   // reason 区分 WS 断开与列表 RPC 失败——两者都会显示「连接已断开」。
   if (prev !== state) Diag.record('conn', { state, why: reason || '', ...(extra || {}) })
@@ -10043,7 +10072,7 @@ async function vTranscribeAndSend(blob) {
   const timeout = setTimeout(() => { try { VOICE.asrAbort.abort() } catch (err) {} }, 40000)
   try {
     const r = await fetch('/api/pwa.asr', { method: 'POST', body: blob, headers: { 'content-type': blob.type || 'audio/wav' }, signal: VOICE.asrAbort.signal })
-    if (r.status === 401) { markAuthExpired(); throw new Error('登录已过期') }
+    if (r.status === 401) { await confirmAuthExpired(); throw new Error(S.authExpired ? '登录已过期' : '鉴权暂不可用，请稍后重试') }
     const j = await r.json().catch(() => null)
     if (!r.ok) throw new Error((j && j.message) || ('ASR ' + r.status))
     text = String((j && j.text) || '').trim()
@@ -10215,7 +10244,7 @@ async function speakPipeline(s, item, surface) {
         signal: AbortSignal.timeout(45000),
       })
       if (r.ok) script = (await r.text()).trim()
-      else if (r.status === 401) markAuthExpired()
+      else if (r.status === 401) await confirmAuthExpired()
     } catch (e) { /* 改写失败 → 本地规则兜底 */ }
     if (script && !ttsScriptComplete(script)) script = null   // 句中断流：退回完整原文，别念一半
     if (!script) script = ttsPrepare(item.text)
