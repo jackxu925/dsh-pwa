@@ -4014,7 +4014,7 @@ function peekTargetsHTML() {
     '<div class="peek-target" data-dir="open"><div class="pt-ring"></div>' +
       '<div class="pt-copy"><b class="pt-label">打开会话</b><span class="pt-sub">上滑</span></div></div>' +
     '<div class="peek-target" data-dir="close"><div class="pt-ring"></div>' +
-      '<div class="pt-copy"><b class="pt-label">关闭卡片</b><span class="pt-sub">下滑</span></div></div>'
+      '<div class="pt-copy"><b class="pt-label">关闭预览</b><span class="pt-sub">下滑</span></div></div>'
 }
 function peekMsgsHTML(msgs) {
   return msgs.map((m) =>
@@ -4203,16 +4203,18 @@ function peekUpdateDrag(rawY) {
   const visual = sign * Math.min(eased * 0.12, 6)
   const p = Math.min(1, abs / PEEK_THRESHOLD)
   Peek.stage.style.transform = 'translate3d(0,' + visual + 'px,0) scale(' + (1 - p * 0.006) + ')'
+  // 下滑只关预览、不归档（AUDIT #167）：下滑是手机上通用的「取消」手势，绑归档会让人凭直觉一拖就中招；
+  // 归档是破坏性动作，只保留 ⋯ 菜单的显式入口。因此只有「上滑打开」能武装提交，下滑过了阈值只提示「松开关闭预览」。
   const intent = abs < 10 ? null : (raw < 0 ? 'open' : 'close')
   Peek.intent = intent
-  const armed = abs >= PEEK_THRESHOLD && intent
+  const armed = abs >= PEEK_THRESHOLD && intent === 'open' ? 'open' : false
   if (armed && !Peek.armed) { Peek.armed = true; vibrate(14) }
   else if (!armed && Peek.armed) Peek.armed = false
+  const closeReady = intent === 'close' && abs >= PEEK_THRESHOLD
   const layer = Peek.layer
   layer.classList.toggle('to-open', intent === 'open')
   layer.classList.toggle('to-close', intent === 'close')
   layer.classList.toggle('armed-open', armed === 'open')
-  layer.classList.toggle('armed-close', armed === 'close')
   const openRing = layer.querySelector('.peek-target[data-dir="open"] .pt-ring')
   const closeRing = layer.querySelector('.peek-target[data-dir="close"] .pt-ring')
   if (openRing) openRing.style.setProperty('--p', intent === 'open' ? p.toFixed(3) : '0')
@@ -4220,34 +4222,15 @@ function peekUpdateDrag(rawY) {
   const openSub = layer.querySelector('.peek-target[data-dir="open"] .pt-sub')
   const closeSub = layer.querySelector('.peek-target[data-dir="close"] .pt-sub')
   if (openSub) openSub.textContent = armed === 'open' ? '松开即生效' : '上滑'
-  if (closeSub) closeSub.textContent = armed === 'close' ? '松开即生效' : '下滑'
+  if (closeSub) closeSub.textContent = closeReady ? '松开关闭预览' : '下滑'
   const foot = Peek.stage.querySelector('.pk-foot-hint')
   if (foot) {
     if (armed === 'open') foot.textContent = '松开打开会话'
-    else if (armed === 'close') foot.textContent = '松开关闭卡片'
+    else if (closeReady) foot.textContent = '松开关闭预览'
     else if (intent === 'open') foot.textContent = '继续上滑 · 松开打开'
-    else if (intent === 'close') foot.textContent = '继续下滑 · 松开关闭'
+    else if (intent === 'close') foot.textContent = '继续下滑 · 松开关闭预览'
     else foot.textContent = '中间松手取消'
   }
-}
-
-function peekArchive(sid) {
-  const s = sess(sid)
-  if (!s) return
-  const title = sessTitle(s)
-  toast('正在收起…')
-  rpc('workspace/archiveSession', { request: { sessionId: sid } }).then((av) => {
-    if (av && Array.isArray(av.archivedSessionIds)) S.archived = new Set(av.archivedSessionIds)
-    S.sessions.delete(sid)
-    renderList()
-    refreshBadges()
-    toast('已收起「' + title + '」· 可在桌面端恢复')
-  }).catch((e) => {
-    S.archived.delete(sid)
-    const card = $('#session-list .session-card[data-sid="' + sid + '"]')
-    if (card) card.style.visibility = ''
-    toast('收起失败：' + e.message, true)
-  })
 }
 
 function peekCloseLayer() {
@@ -4286,7 +4269,9 @@ function finishPeek(cancelled) {
   if (!Peek.active || Peek.finishing) return
   Peek.finishing = true
   Peek.pressing = false
-  const commit = !cancelled && Peek.intent && Math.abs(Peek.raw) >= PEEK_THRESHOLD
+  // 只有「上滑打开」是提交动作；下滑过阈值 = 顺着手指方向关掉预览（不归档，见 AUDIT #167）。
+  const commit = !cancelled && Peek.intent === 'open' && Math.abs(Peek.raw) >= PEEK_THRESHOLD
+  const dismiss = !cancelled && Peek.intent === 'close' && Math.abs(Peek.raw) >= PEEK_THRESHOLD
   const intent = Peek.intent
   const sid = Peek.sid
   const stage = Peek.stage
@@ -4309,21 +4294,15 @@ function finishPeek(cancelled) {
     }, 240)
     return
   }
-  if (commit && intent === 'close') {
-    stage.style.transition = 'transform .24s cubic-bezier(.2,.9,.25,1), opacity .2s ease'
+  if (dismiss) {
+    stage.style.transition = 'transform .22s cubic-bezier(.2,.9,.25,1), opacity .18s ease'
     stage.style.transform = 'translate3d(0,120px,0) scale(.97)'
     stage.style.opacity = '0'
-    setTimeout(() => {
-      if (Peek.gen !== gen) return
-      if (bd) { bd.style.transition = 'opacity .18s ease'; bd.style.opacity = '0' }
-    }, 170)
+    if (bd) { bd.style.transition = 'opacity .18s ease'; bd.style.opacity = '0' }
     setTimeout(() => {
       if (Peek.gen !== gen) return
       peekCloseLayer()
-      const current = $('#session-list .session-card[data-sid="' + sid + '"]')
-      if (current) current.style.visibility = 'hidden'
-      peekArchive(sid)
-    }, 380)
+    }, 200)
     return
   }
   stage.style.transition = 'left .26s cubic-bezier(.32,.72,0,1), top .26s cubic-bezier(.32,.72,0,1), width .26s cubic-bezier(.32,.72,0,1), height .26s cubic-bezier(.32,.72,0,1), border-radius .26s cubic-bezier(.32,.72,0,1), transform .26s cubic-bezier(.32,.72,0,1)'
